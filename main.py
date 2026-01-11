@@ -1,219 +1,161 @@
 import streamlit as st
 import pandas as pd
-from datetime import timedelta
 import plotly.express as px
 
-# Sayfa Ayarları
-st.set_page_config(page_title="Satış Analiz Paneli", layout="wide")
+st.set_page_config(page_title="Satış Performans Raporu", layout="wide")
 
 # ---------------------------------------------------------
-# 1. VERİ YÜKLEME VE İŞLEME MOTORU
+# 1. VERİ YÜKLEME VE TEMİZLEME
 # ---------------------------------------------------------
 @st.cache_data
 def load_data(uploaded_file):
-    """
-    Excel/CSV dosyasını okur, sütun isimlerini standartlaştırır
-    ve tarih formatını düzenler.
-    """
-    # Dosya tipine göre okuma
     if uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
     
-    # Sütun adlarındaki boşlukları temizle
+    # Boşlukları temizle
     df.columns = df.columns.str.strip()
     
-    # --- AKILLI SÜTUN EŞLEŞTİRME ---
-    # Sizin Excel'deki olası isimler -> Kodun anladığı isimler
-    rename_map = {
-        # Ciro varyasyonları
-        'Tutar': 'Ciro', 'Satış Tutarı': 'Ciro', 'Amount': 'Ciro', 'Total': 'Ciro', 'Satis Tutari': 'Ciro',
-        # Adet varyasyonları
-        'Adet': 'Satis_Adedi', 'Miktar': 'Satis_Adedi', 'Quantity': 'Satis_Adedi', 'Qty': 'Satis_Adedi', 'Satis Adedi': 'Satis_Adedi',
-        # Hesap varyasyonları
-        'Account': 'Hesap', 'Firma': 'Hesap', 'Mağaza': 'Hesap', 'Magaza': 'Hesap', 'Platform': 'Hesap',
-        # Tarih varyasyonları
-        'Date': 'Tarih', 'Siparis Tarihi': 'Tarih', 'İşlem Tarihi': 'Tarih'
-    }
-    df.rename(columns=rename_map, inplace=True)
+    # Unnamed (isimsiz) boş sütunları sil
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
     
-    # --- TARİH OLUŞTURMA MANTIĞI ---
-    # Eğer 'Tarih' sütunu yoksa ama 'Yıl' ve 'Ay' varsa bunları birleştir
-    col_yil = next((c for c in ['Yıl', 'Year', 'Yil'] if c in df.columns), None)
-    col_ay = next((c for c in ['Ay', 'Month', 'Donem', 'Dönem'] if c in df.columns), None)
-
-    if 'Tarih' not in df.columns and col_yil and col_ay:
-        try:
-            # Türkçe Ay isimlerini sayıya çevir
-            ay_map = {
-                'Ocak':1, 'Şubat':2, 'Mart':3, 'Nisan':4, 'Mayıs':5, 'Haziran':6,
-                'Temmuz':7, 'Ağustos':8, 'Eylül':9, 'Ekim':10, 'Kasım':11, 'Aralık':12,
-                'January':1, 'February':2, 'March':3, 'April':4, 'May':5, 'June':6,
-                'July':7, 'August':8, 'September':9, 'October':10, 'November':11, 'December':12
-            }
-            
-            # Eğer ay sütunu metinse (Ocak vb.) sayıya çevir
-            if df[col_ay].dtype == 'O':
-                df['Ay_Num'] = df[col_ay].map(ay_map).fillna(1).astype(int)
-            else:
-                df['Ay_Num'] = df[col_ay].astype(int)
-            
-            # Yıl ve Ay'ı birleştirip gün olarak 1 veriyoruz (Örn: 2025-01-01)
-            df['Tarih'] = pd.to_datetime(df[col_yil].astype(str) + '-' + df['Ay_Num'].astype(str) + '-01')
-            
-        except Exception as e:
-            st.warning(f"Tarih oluşturulurken hata oluştu: {e}")
-
-    # Tarih sütunu varsa datetime formatına zorla
-    if 'Tarih' in df.columns:
-        df['Tarih'] = pd.to_datetime(df['Tarih'], errors='coerce')
-        
     return df
 
-@st.cache_data
-def create_sample_data():
-    """Dosya yoksa hatasız örnek veri oluşturur"""
-    dates = pd.date_range(start='2024-01-01', end='2025-12-31', freq='D')
-    n = len(dates)
-    
-    # Dizileri eşit uzunlukta kesiyoruz (Hata önleyici)
-    hesaplar = (['HomeByHome', 'CarpetSale24'] * n)[:n]
-    satislar = ([5, 10, 2, 8, 15, 3] * n)[:n]
-    cirolar = ([500, 1000, 200, 800, 1500, 300] * n)[:n]
-
-    return pd.DataFrame({
-        'Tarih': dates,
-        'Hesap': hesaplar,
-        'Satis_Adedi': satislar,
-        'Ciro': cirolar
-    })
+# Sayısal veriye çevirme fonksiyonu (TL simgesi veya virgül hatalarını düzeltir)
+def clean_currency(x):
+    if isinstance(x, str):
+        # TL, boşluk ve harfleri temizle
+        clean_str = x.replace('TL', '').replace('.', '').replace(',', '.').strip()
+        try:
+            return float(clean_str)
+        except:
+            return 0.0
+    return x
 
 # ---------------------------------------------------------
-# 2. SIDEBAR - YÖNETİM PANELİ
+# 2. SIDEBAR - DOSYA VE EŞLEŞTİRME
 # ---------------------------------------------------------
-st.sidebar.title("🎛️ Yönetim Paneli")
+st.sidebar.title("🎛️ Rapor Ayarları")
 
-# A. Dosya Yükleme
-uploaded_file = st.sidebar.file_uploader("Excel veya CSV Yükle", type=["xlsx", "xls", "csv"])
+uploaded_file = st.sidebar.file_uploader("Excel Dosyanızı Yükleyin", type=["xlsx", "xls", "csv"])
 
-# B. Sıfırlama Butonu
-if st.sidebar.button("⚠️ Veritabanını Sıfırla / Temizle"):
+if st.sidebar.button("⚠️ Sıfırla"):
     st.cache_data.clear()
-    st.toast("Veri önbelleği temizlendi!", icon="🧹")
     st.rerun()
 
-st.sidebar.divider()
-
-# C. Veri Yükleme Kontrolü
-try:
-    if uploaded_file:
+# --- VERİ YÜKLEME KONTROLÜ ---
+if uploaded_file:
+    try:
         df = load_data(uploaded_file)
-        st.sidebar.success("✅ Dosya Yüklendi")
-    else:
-        df = create_sample_data()
-        st.sidebar.info("ℹ️ Demo Modu (Örnek Veri)")
-
-    # Zorunlu Sütun Kontrolü
-    required = ['Tarih', 'Hesap', 'Ciro', 'Satis_Adedi']
-    missing = [c for c in required if c not in df.columns]
-    
-    if missing:
-        st.error(f"❌ Hata: Dosyanızda şu sütunlar bulunamadı veya oluşturulamadı: {missing}")
-        st.warning(f"Dosyanızdaki sütunlar: {list(df.columns)}")
+        st.sidebar.success("✅ Dosya Okundu")
+    except Exception as e:
+        st.error(f"Dosya okunamadı: {e}")
         st.stop()
-        
-except Exception as e:
-    st.error(f"Bir hata oluştu: {e}")
+else:
+    # Dosya yoksa demo verisi oluşturmuyoruz, kullanıcıdan dosya bekliyoruz
+    st.info("Lütfen sol menüden Excel dosyanızı yükleyiniz.")
     st.stop()
 
-# D. Filtreleme Seçenekleri
-hesap_listesi = ["Tümü"] + sorted(list(df['Hesap'].unique()))
-hesap_secimi = st.sidebar.selectbox("Hesap Seçin:", hesap_listesi)
+st.sidebar.divider()
+st.sidebar.subheader("Sütun Eşleştirme")
+st.sidebar.info("Excel'inizdeki sütun isimlerini aşağıdan seçiniz:")
 
-secilen_tarih = st.sidebar.date_input("Analiz Tarihi", value=pd.to_datetime("2025-01-01"))
+# --- KOLON SEÇİMLERİ (Sizin Data Yapınıza Göre) ---
+# Otomatik seçmesi için varsayılan değerleri tahmin etmeye çalışıyoruz
+all_columns = df.columns.tolist()
+
+# 1. Bu Ayın Cirosu (Örn: 1-31 Ocak Ciro)
+index_ciro_guncel = next((i for i, c in enumerate(all_columns) if 'Ciro' in c and '2024' not in c and 'artışı' not in c), 0)
+col_ciro_guncel = st.sidebar.selectbox("📅 BU YIL CİRO Sütunu Hangisi?", all_columns, index=index_ciro_guncel)
+
+# 2. Geçen Yıl Cirosu (Örn: 2024 Ciro)
+index_ciro_gecen = next((i for i, c in enumerate(all_columns) if '2024 Ciro' in c), 0)
+col_ciro_gecen = st.sidebar.selectbox("⏮️ GEÇEN YIL CİRO Sütunu Hangisi?", all_columns, index=index_ciro_gecen)
+
+# 3. Sipariş Adedi (Örn: 1-31 Ocak Total Order)
+index_order = next((i for i, c in enumerate(all_columns) if 'Total Order' in c and '.1' not in c), 0)
+col_order = st.sidebar.selectbox("📦 SİPARİŞ ADEDİ Sütunu Hangisi?", all_columns, index=index_order)
+
+# 4. Hesap Sütunu
+index_hesap = next((i for i, c in enumerate(all_columns) if 'Hesap' in c or 'Account' in c), 0)
+col_hesap = st.sidebar.selectbox("👤 HESAP İSMİ Sütunu Hangisi?", all_columns, index=index_hesap)
+
+# Verileri Sayısal Formata Çevir (Garantiye al)
+df[col_ciro_guncel] = pd.to_numeric(df[col_ciro_guncel].apply(clean_currency), errors='coerce').fillna(0)
+df[col_ciro_gecen] = pd.to_numeric(df[col_ciro_gecen].apply(clean_currency), errors='coerce').fillna(0)
+df[col_order] = pd.to_numeric(df[col_order], errors='coerce').fillna(0)
 
 # ---------------------------------------------------------
-# 3. ANALİZ MOTORU VE KPI HESAPLAMALARI
+# 3. HESAP FİLTRELEME
 # ---------------------------------------------------------
+st.sidebar.divider()
+hesaplar = ["Tümü"] + list(df[col_hesap].unique())
+secilen_hesap = st.sidebar.selectbox("Hesap Filtrele:", hesaplar)
 
-# Veriyi Hesaba Göre Filtrele
-if hesap_secimi != "Tümü":
-    df_filtered = df[df['Hesap'] == hesap_secimi]
+if secilen_hesap != "Tümü":
+    df_analiz = df[df[col_hesap] == secilen_hesap]
 else:
-    df_filtered = df.copy()
-
-def get_metrics(dataframe, target_date):
-    """Seçilen aya göre Geçen Ay ve Geçen Yıl verilerini hesaplar"""
-    t_date = pd.to_datetime(target_date)
-    
-    # Dönem: Bu Ay
-    curr_start = t_date.replace(day=1)
-    curr_end = (curr_start + pd.DateOffset(months=1)) - timedelta(days=1)
-    
-    # Dönem: Geçen Ay
-    prev_m_end = curr_start - timedelta(days=1)
-    prev_m_start = prev_m_end.replace(day=1)
-    
-    # Dönem: Geçen Yıl Aynı Ay
-    prev_y_start = curr_start - pd.DateOffset(years=1)
-    prev_y_end = curr_end - pd.DateOffset(years=1)
-
-    # Verileri Süz
-    curr_df = dataframe[(dataframe['Tarih'] >= curr_start) & (dataframe['Tarih'] <= curr_end)]
-    prev_m_df = dataframe[(dataframe['Tarih'] >= prev_m_start) & (dataframe['Tarih'] <= prev_m_end)]
-    prev_y_df = dataframe[(dataframe['Tarih'] >= prev_y_start) & (dataframe['Tarih'] <= prev_y_end)]
-
-    return {
-        "cur_ciro": curr_df['Ciro'].sum(),
-        "prev_m_ciro": prev_m_df['Ciro'].sum(),
-        "prev_y_ciro": prev_y_df['Ciro'].sum(),
-        "cur_adet": curr_df['Satis_Adedi'].sum(),
-        "label": curr_start.strftime("%B %Y")
-    }
-
-metrics = get_metrics(df_filtered, secilen_tarih)
+    df_analiz = df.copy()
 
 # ---------------------------------------------------------
-# 4. GÖRSELLEŞTİRME VE EKRAN ÇIKTISI
+# 4. ANALİZ VE GÖRSELLEŞTİRME
 # ---------------------------------------------------------
-st.title(f"📊 Satış Analizi: {hesap_secimi}")
-st.markdown(f"### 📅 Dönem: {metrics['label']}")
+st.title(f"📊 Performans Raporu: {secilen_hesap}")
 
-# Karşılaştırma Seçeneği
-karsilastir = st.checkbox("🔄 Karşılaştırmalı Analizi Göster", value=True)
+# Toplamları Hesapla
+toplam_ciro_guncel = df_analiz[col_ciro_guncel].sum()
+toplam_ciro_gecen = df_analiz[col_ciro_gecen].sum()
+toplam_order = df_analiz[col_order].sum()
 
-if karsilastir:
-    st.markdown("---")
-    col1, col2, col3 = st.columns(3)
-    
-    # Farklar
-    fark_ay = metrics['cur_ciro'] - metrics['prev_m_ciro']
-    fark_yil = metrics['cur_ciro'] - metrics['prev_y_ciro']
-    
-    with col1:
-        st.metric("Mevcut Ciro", f"{metrics['cur_ciro']:,.2f} TL", "Güncel")
-    with col2:
-        st.metric("Geçen Ay", f"{metrics['prev_m_ciro']:,.2f} TL", f"{fark_ay:,.2f} TL")
-    with col3:
-        st.metric("Geçen Yıl Aynı Ay", f"{metrics['prev_y_ciro']:,.2f} TL", f"{fark_yil:,.2f} TL")
-    
-    st.info(f"📦 Bu dönemde toplam **{metrics['cur_adet']}** adet satış işlemi gerçekleşmiştir.")
-    
-    # Grafik
-    st.subheader("📈 Dönemsel Ciro Grafiği")
-    chart_data = pd.DataFrame({
-        'Dönem': ['Geçen Yıl', 'Geçen Ay', 'Bu Ay'],
-        'Ciro': [metrics['prev_y_ciro'], metrics['prev_m_ciro'], metrics['cur_ciro']]
-    })
-    
-    fig = px.bar(
-        chart_data, x='Dönem', y='Ciro', text='Ciro', color='Dönem',
-        color_discrete_sequence=['#ff9f43', '#54a0ff', '#1dd1a1']
+fark_tl = toplam_ciro_guncel - toplam_ciro_gecen
+degisim_yuzde = ((toplam_ciro_guncel - toplam_ciro_gecen) / toplam_ciro_gecen * 100) if toplam_ciro_gecen != 0 else 0
+
+# --- KPI KARTLARI ---
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric(
+        label=f"Bu Dönem Ciro ({col_ciro_guncel})",
+        value=f"{toplam_ciro_guncel:,.0f} TL",
+        delta=f"{degisim_yuzde:.1f}%"
     )
-    fig.update_traces(texttemplate='%{text:.2s}', textposition='outside')
-    st.plotly_chart(fig, use_container_width=True)
 
-else:
-    st.subheader("📋 Veri Listesi (Son 15 İşlem)")
-    st.dataframe(df_filtered.tail(15), use_container_width=True)
+with col2:
+    st.metric(
+        label=f"Geçen Yıl Aynı Dönem ({col_ciro_gecen})",
+        value=f"{toplam_ciro_gecen:,.0f} TL",
+        delta=f"{fark_tl:,.0f} TL Fark",
+        delta_color="normal"
+    )
+
+with col3:
+    st.metric(
+        label="Toplam Sipariş (Order)",
+        value=f"{toplam_order:,.0f} Adet",
+        delta="Bu Ay"
+    )
+
+# --- GRAFİKSEL KARŞILAŞTIRMA ---
+st.divider()
+st.subheader("📈 Karşılaştırmalı Analiz")
+
+chart_data = pd.DataFrame({
+    'Dönem': ['Geçen Yıl', 'Bu Yıl'],
+    'Ciro': [toplam_ciro_gecen, toplam_ciro_guncel]
+})
+
+fig = px.bar(chart_data, x='Dönem', y='Ciro', text='Ciro', 
+             color='Dönem', color_discrete_sequence=['#bdc3c7', '#2ecc71'])
+fig.update_traces(texttemplate='%{text:,.0f} TL', textposition='outside')
+st.plotly_chart(fig, use_container_width=True)
+
+# --- DETAYLI TABLO ---
+st.subheader("📋 Detaylı Veri Listesi")
+# Sadece önemli sütunları gösterelim
+gosterilecek_kolonlar = [col_hesap, 'Ülke', col_ciro_guncel, col_ciro_gecen, col_order]
+# Eğer tabloda 'Reklam Harcaması' varsa onu da ekleyelim
+if 'Reklam Harcaması' in df.columns:
+    gosterilecek_kolonlar.append('Reklam Harcaması')
+
+st.dataframe(df_analiz[gosterilecek_kolonlar], use_container_width=True)
