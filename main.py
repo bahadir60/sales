@@ -44,7 +44,7 @@ def clean_currency(x):
 # ---------------------------------------------------------
 st.sidebar.title("🎛️ Rapor Ayarları")
 
-# MANUEL YIL SEÇİMİ (2026 yılındayken 2025 verisine bakmak için)
+# MANUEL YIL SEÇİMİ
 st.sidebar.subheader("1. Rapor Dönemi")
 rapor_yili = st.sidebar.number_input("Raporlanacak Yıl (Ana Veri)", min_value=2020, max_value=2030, value=2025)
 karsilastirma_yili = rapor_yili - 1 
@@ -81,37 +81,27 @@ if uploaded_file:
     idx_current = 0
     idx_prev = 0
     idx_hesap = 0
+    idx_ulke = 0
     
-    # Basit kelime eşleştirme mantığı
     for i, c in enumerate(cols):
         c_low = c.lower()
-        # Bu yıl tahmini
+        # Ciro Tahminleri
         if (str(rapor_yili) in c) or (rapor_ayi.lower() in c_low and str(karsilastirma_yili) not in c):
-            if 'ciro' in c_low or 'tutar' in c_low:
-                idx_current = i
-        # Geçen yıl tahmini
+            if 'ciro' in c_low or 'tutar' in c_low: idx_current = i
         if (str(karsilastirma_yili) in c) or ('geçen' in c_low) or ('2024' in c):
-            if 'ciro' in c_low or 'tutar' in c_low:
-                idx_prev = i
-        # Hesap tahmini
-        if any(x in c.lower() for x in ['hesap', 'account', 'mağaza', 'store', 'firma']):
-            idx_hesap = i
+            if 'ciro' in c_low or 'tutar' in c_low: idx_prev = i
+        
+        # Hesap ve Ülke Tahminleri
+        if any(x in c_low for x in ['hesap', 'account', 'mağaza', 'firma']): idx_hesap = i
+        if any(x in c_low for x in ['ülke', 'country', 'region', 'bölge']): idx_ulke = i
 
-    # --- KULLANICI SEÇİMİ ---
+    # --- KULLANICI SEÇİMİ (EŞLEŞTİRME) ---
     st.sidebar.subheader("3. Sütun Eşleştirme")
     col_hesap = st.sidebar.selectbox("Firma/Hesap Sütunu", cols, index=idx_hesap)
+    col_ulke = st.sidebar.selectbox("Ülke Sütunu", cols, index=idx_ulke) # Yeni Eklendi
     
-    col_ciro_guncel = st.sidebar.selectbox(
-        f"📅 {rapor_yili} Ciro Sütunu", 
-        cols, 
-        index=idx_current
-    )
-    
-    col_ciro_gecen = st.sidebar.selectbox(
-        f"⏮️ {karsilastirma_yili} Ciro Sütunu", 
-        cols, 
-        index=idx_prev
-    )
+    col_ciro_guncel = st.sidebar.selectbox(f"📅 {rapor_yili} Ciro Sütunu", cols, index=idx_current)
+    col_ciro_gecen = st.sidebar.selectbox(f"⏮️ {karsilastirma_yili} Ciro Sütunu", cols, index=idx_prev)
 
     # Verileri sayıya çevirme
     try:
@@ -125,27 +115,40 @@ else:
     st.stop()
 
 # ---------------------------------------------------------
-# 4. FİLTRELEME VE ANALİZ
+# 4. ÇİFT KATMANLI FİLTRELEME
 # ---------------------------------------------------------
+st.sidebar.divider()
+st.sidebar.subheader("4. Filtreleme Seçenekleri")
 
-# --- HATA DÜZELTME NOKTASI BURASI ---
+# --- HESAP LİSTESİ ---
 try:
-    # 1. Boş (NaN) değerleri at
-    # 2. Hepsini String (Yazı) formatına çevir (Sayılar '123' olur)
-    # 3. Benzersizleri bul ve sırala
     unique_accounts = sorted(df[col_hesap].dropna().astype(str).unique())
     hesap_listesi = ["Tümü"] + unique_accounts
-except Exception as e:
-    st.error(f"Hesap listesi oluşturulurken hata: {e}")
-    st.stop()
+except:
+    hesap_listesi = ["Tümü"]
 
-secilen_hesap = st.sidebar.selectbox("4. Hesap Filtrele", hesap_listesi)
+# --- ÜLKE LİSTESİ (Yeni) ---
+try:
+    unique_countries = sorted(df[col_ulke].dropna().astype(str).unique())
+    ulke_listesi = ["Tümü"] + unique_countries
+except:
+    ulke_listesi = ["Tümü"]
 
+# Seçim Kutuları
+secilen_hesap = st.sidebar.selectbox("Hesap Seç:", hesap_listesi)
+secilen_ulke = st.sidebar.selectbox("Ülke Seç:", ulke_listesi)
+
+# --- FİLTRELEME MANTIĞI ---
+df_filtered = df.copy()
+
+# 1. Hesap Filtresi Uygula
 if secilen_hesap != "Tümü":
-    # Karşılaştırma yaparken de sütunu string'e çeviriyoruz
-    df_filtered = df[df[col_hesap].astype(str) == secilen_hesap]
-else:
-    df_filtered = df.copy()
+    df_filtered = df_filtered[df_filtered[col_hesap].astype(str) == secilen_hesap]
+
+# 2. Ülke Filtresi Uygula (Mevcut filtrelenmiş veri üzerinden devam eder)
+if secilen_ulke != "Tümü":
+    df_filtered = df_filtered[df_filtered[col_ulke].astype(str) == secilen_ulke]
+
 
 # KPI Hesaplamaları
 toplam_guncel = df_filtered[col_ciro_guncel].sum()
@@ -156,50 +159,74 @@ degisim = (fark / toplam_gecen * 100) if toplam_gecen > 0 else 0
 # ---------------------------------------------------------
 # 5. GÖRSELLEŞTİRME
 # ---------------------------------------------------------
-st.title(f"📊 {rapor_yili} vs {karsilastirma_yili} Satış Karşılaştırması")
-st.markdown(f"**Dönem:** {rapor_ayi} | **Seçilen Hesap:** {secilen_hesap}")
+baslik_text = f"{rapor_yili} vs {karsilastirma_yili} Satış Karşılaştırması"
+filtre_ozeti = f"Hesap: {secilen_hesap} | Ülke: {secilen_ulke}"
 
-# Metrikler
+st.title(f"📊 {baslik_text}")
+st.markdown(f"**Dönem:** {rapor_ayi} | **{filtre_ozeti}**")
+
+# Metrik Kartları
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric(f"{rapor_yili} Ciro", f"{toplam_guncel:,.0f} TL", f"{degisim:.1f}%")
 with col2:
     st.metric(f"{karsilastirma_yili} Ciro", f"{toplam_gecen:,.0f} TL", f"{fark:,.0f} TL", delta_color="normal")
 with col3:
-    if secilen_hesap == "Tümü" and not df_filtered.empty:
-        # En iyi hesabı bul
-        df_grouped = df_filtered.groupby(col_hesap)[col_ciro_guncel].sum()
-        if not df_grouped.empty:
-            en_iyi = df_grouped.idxmax()
-            st.metric("Lider Mağaza", str(en_iyi))
+    if not df_filtered.empty:
+        # Filtreye göre en iyiyi dinamik belirle
+        group_col = col_hesap if secilen_hesap == "Tümü" else col_ulke
+        
+        # Eğer hem hesap hem ülke seçiliyse tek satır kalır, gruplamaya gerek kalmaz
+        if secilen_hesap != "Tümü" and secilen_ulke != "Tümü":
+             st.metric("Durum", "Tek Kayıt Görüntüleniyor")
+        else:
+            try:
+                df_grp = df_filtered.groupby(group_col)[col_ciro_guncel].sum()
+                if not df_grp.empty:
+                    best = df_grp.idxmax()
+                    st.metric("Lider (Seçime Göre)", str(best))
+            except:
+                st.metric("Durum", "-")
     else:
-        st.metric("Durum", "Filtreli Görünüm")
+        st.metric("Durum", "Veri Yok")
 
 st.divider()
 
 # Grafikler
-col_g1, col_g2 = st.columns([2, 1])
-
-with col_g1:
-    st.subheader("📈 Genel Karşılaştırma")
-    chart_data = pd.DataFrame({
-        'Yıl': [str(karsilastirma_yili), str(rapor_yili)],
-        'Ciro': [toplam_gecen, toplam_guncel]
-    })
-    fig = px.bar(chart_data, x='Yıl', y='Ciro', text='Ciro', color='Yıl',
-                 color_discrete_map={str(karsilastirma_yili): '#95a5a6', str(rapor_yili): '#27ae60'})
-    fig.update_traces(texttemplate='%{text:,.0f} TL', textposition='outside')
-    st.plotly_chart(fig, use_container_width=True)
-
-with col_g2:
-    if secilen_hesap == "Tümü" and not df_filtered.empty:
-        st.subheader("🏆 Mağaza Payları")
-        # Negatif değerleri filtreleyerek pasta grafik çiz
-        pie_data = df_filtered[df_filtered[col_ciro_guncel] > 0]
-        fig2 = px.pie(pie_data, values=col_ciro_guncel, names=col_hesap, hole=0.4)
-        st.plotly_chart(fig2, use_container_width=True)
-
-# Tablo
-st.subheader("📋 Detaylı Veri")
 if not df_filtered.empty:
-    st.dataframe(df_filtered[[col_hesap, col_ciro_gecen, col_ciro_guncel]], use_container_width=True)
+    col_g1, col_g2 = st.columns([2, 1])
+
+    with col_g1:
+        st.subheader("📈 Genel Karşılaştırma")
+        chart_data = pd.DataFrame({
+            'Yıl': [str(karsilastirma_yili), str(rapor_yili)],
+            'Ciro': [toplam_gecen, toplam_guncel]
+        })
+        fig = px.bar(chart_data, x='Yıl', y='Ciro', text='Ciro', color='Yıl',
+                     color_discrete_map={str(karsilastirma_yili): '#95a5a6', str(rapor_yili): '#27ae60'})
+        fig.update_traces(texttemplate='%{text:,.0f} TL', textposition='outside')
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_g2:
+        # Eğer Hesap seçili değilse Hesaba göre pasta grafik
+        # Eğer Hesap seçili ama Ülke seçili değilse Ülkeye göre pasta grafik
+        if secilen_hesap == "Tümü":
+            st.subheader("🏆 Mağaza Bazlı Dağılım")
+            pie_col = col_hesap
+        elif secilen_ulke == "Tümü":
+            st.subheader("🌍 Ülke Bazlı Dağılım")
+            pie_col = col_ulke
+        else:
+            pie_col = None # İkisi de seçiliyse pasta grafiğe gerek yok
+            
+        if pie_col:
+            pie_data = df_filtered[df_filtered[col_ciro_guncel] > 0]
+            fig2 = px.pie(pie_data, values=col_ciro_guncel, names=pie_col, hole=0.4)
+            st.plotly_chart(fig2, use_container_width=True)
+
+    # Detay Tablo
+    st.subheader("📋 Detaylı Veri")
+    st.dataframe(df_filtered[[col_hesap, col_ulke, col_ciro_gecen, col_ciro_guncel]], use_container_width=True)
+
+else:
+    st.warning("⚠️ Seçilen filtrelere uygun veri bulunamadı.")
