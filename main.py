@@ -8,12 +8,12 @@ from dateutil.relativedelta import relativedelta
 # ---------------------------------------------------------
 # SAYFA AYARLARI
 # ---------------------------------------------------------
-st.set_page_config(page_title="E-Ticaret Yönetim Paneli V8", layout="wide", page_icon="📈")
+st.set_page_config(page_title="E-Ticaret Yönetim Paneli V9", layout="wide", page_icon="🔄")
 
-DB_FILE = 'eticaret_db_pro_v8.csv'
+DB_FILE = 'eticaret_db_pro_v9.csv'
 
 # ---------------------------------------------------------
-# 1. VERİTABANI MOTORU
+# 1. VERİTABANI VE GÜNCELLEME MOTORU
 # ---------------------------------------------------------
 def init_db():
     columns = [
@@ -50,8 +50,56 @@ def calculate_metrics(df):
     
     return df
 
-def save_db(df):
-    df.to_csv(DB_FILE, index=False)
+def update_database(new_df):
+    """
+    AKILLI GÜNCELLEME (UPSERT):
+    Aynı Tarih + Firma + Ülke kombinasyonuna sahip eski verileri siler,
+    yerine yeni gelen verileri yazar.
+    """
+    if new_df.empty:
+        return st.session_state.main_df
+
+    # 1. Mevcut veritabanını al
+    current_df = st.session_state.main_df.copy()
+    
+    # Tarih formatlarını garantiye al
+    current_df['Tarih'] = pd.to_datetime(current_df['Tarih'])
+    new_df['Tarih'] = pd.to_datetime(new_df['Tarih'])
+    
+    # 2. Benzersiz Anahtar Oluştur (Tarih_Firma_Ulke)
+    # Bu anahtar sayesinde çakışmaları bulacağız
+    def create_key(df):
+        return df['Tarih'].dt.strftime('%Y-%m-%d') + "_" + df['Firma'].astype(str) + "_" + df['Ulke'].astype(str)
+
+    current_df['unique_key'] = create_key(current_df)
+    new_df['unique_key'] = create_key(new_df)
+    
+    # 3. Çakışan Anahtarları Bul ve Eskileri Sil
+    keys_to_remove = new_df['unique_key'].unique()
+    
+    # Mevcut DB'den, yeni gelen anahtarlara sahip olanları çıkar (Drop Old)
+    current_df_cleaned = current_df[~current_df['unique_key'].isin(keys_to_remove)].copy()
+    
+    # 4. Temizlenmiş DB ile Yeni Veriyi Birleştir
+    # unique_key sütununu artık kaldırabiliriz
+    if 'unique_key' in current_df_cleaned.columns:
+        current_df_cleaned = current_df_cleaned.drop(columns=['unique_key'])
+    if 'unique_key' in new_df.columns:
+        new_df = new_df.drop(columns=['unique_key'])
+        
+    final_df = pd.concat([current_df_cleaned, new_df], ignore_index=True)
+    
+    # ID'leri Yeniden Sırala
+    final_df['id'] = range(1, len(final_df) + 1)
+    
+    # 5. Hesapla ve Kaydet
+    final_df = calculate_metrics(final_df)
+    final_df.to_csv(DB_FILE, index=False)
+    
+    # Session State Güncelle
+    st.session_state.main_df = final_df
+    
+    return len(keys_to_remove) # Kaç kayıt güncellendi bilgisini dön
 
 def clean_currency(x):
     if isinstance(x, str):
@@ -81,7 +129,9 @@ menu = st.sidebar.radio("Seçim:", ["📊 Dönemsel Karşılaştırma", "📤 Ex
 # MODÜL 1: EXCEL YÜKLEME
 # ---------------------------------------------------------
 if menu == "📤 Excel Yükle":
-    st.title("📤 Akıllı Excel Yükleyici")
+    st.title("📤 Akıllı Excel Yükleyici (Overwrite Modu)")
+    st.info("ℹ️ Aynı döneme (Tarih+Firma+Ülke) ait veri yüklerseniz, eski veriler silinip yenileri kaydedilir.")
+    
     uploaded_file = st.file_uploader("Dosya Seç", type=["xlsx", "xls"])
 
     if uploaded_file:
@@ -103,7 +153,7 @@ if menu == "📤 Excel Yükle":
             if month_num == 0:
                 month_num = c2.number_input("Ay No (1-12):", min_value=1, max_value=12)
             else:
-                c2.success(f"Ay Tespit Edildi: {month_num}")
+                c2.success(f"Ay Tespit Edildi: {month_num}. Ay")
 
             df_temp = xls[selected_sheet].copy()
             header_row = 0
@@ -144,8 +194,8 @@ if menu == "📤 Excel Yükle":
                 map_as24 = st.selectbox("2024 Ads Sales", cols, index=get_col(['2024 ads sales'], cols))
                 map_ao24 = st.selectbox("2024 Ads Order", cols, index=get_col(['2024 ads order'], cols))
 
-            if st.button("💾 Kaydet"):
-                # 2025
+            if st.button("💾 Veritabanını Güncelle"):
+                # 2025 Hazırlığı
                 df_2025 = pd.DataFrame()
                 df_2025['Firma'] = df_temp[map_firm]
                 df_2025['Ulke'] = df_temp[map_country]
@@ -153,7 +203,7 @@ if menu == "📤 Excel Yükle":
                 for c, m in zip(['Sales','Unit','AdsSpend','AdsSales','AdsOrder'], [map_s25, map_u25, map_sp25, map_as25, map_ao25]):
                     df_2025[c] = df_temp[m].apply(clean_currency)
                 
-                # 2024
+                # 2024 Hazırlığı
                 df_2024 = pd.DataFrame()
                 df_2024['Firma'] = df_temp[map_firm]
                 df_2024['Ulke'] = df_temp[map_country]
@@ -161,19 +211,18 @@ if menu == "📤 Excel Yükle":
                 for c, m in zip(['Sales','Unit','AdsSpend','AdsSales','AdsOrder'], [map_s24, map_u24, map_sp24, map_as24, map_ao24]):
                     df_2024[c] = df_temp[m].apply(clean_currency)
                 
+                # Birleştirme ve Temizlik
                 combined = pd.concat([df_2025, df_2024], ignore_index=True)
                 combined = combined.dropna(subset=['Firma'])
                 combined = combined[combined['Sales'] > 0]
                 combined = combined[~combined['Firma'].astype(str).str.contains('Toplam', case=False)]
                 
-                start_id = st.session_state.main_df['id'].max() if not st.session_state.main_df.empty else 0
-                if pd.isna(start_id): start_id = 0
-                combined['id'] = range(int(start_id) + 1, int(start_id) + 1 + len(combined))
+                # VERİTABANI GÜNCELLEME (Overwrite Logic)
+                updated_count = update_database(combined)
                 
-                combined = calculate_metrics(combined)
-                st.session_state.main_df = pd.concat([st.session_state.main_df, combined], ignore_index=True)
-                save_db(st.session_state.main_df)
-                st.success(f"Kayıt Başarılı: {len(combined)} satır.")
+                st.success(f"✅ İşlem Başarılı! {len(combined)} satır işlendi.")
+                if updated_count > 0:
+                    st.warning(f"⚠️ Dikkat: {updated_count} adet eski kayıt güncellendi/üzerine yazıldı.")
 
         except Exception as e:
             st.error(f"Hata: {e}")
@@ -183,6 +232,8 @@ if menu == "📤 Excel Yükle":
 # ---------------------------------------------------------
 elif menu == "📝 Manuel Giriş":
     st.title("📝 Manuel Giriş")
+    st.caption("Aynı tarihe ve firmaya ait giriş yaparsanız eski veri güncellenir.")
+    
     with st.form("manuel"):
         c1, c2, c3 = st.columns(3)
         inp_date = c1.date_input("Tarih", datetime.date.today())
@@ -198,18 +249,15 @@ elif menu == "📝 Manuel Giriş":
         asales = c7.number_input("Ads Sales", min_value=0.0)
         aorder = c8.number_input("Ads Order", min_value=0)
         
-        if st.form_submit_button("Kaydet"):
-            max_id = st.session_state.main_df['id'].max()
-            new_id = 1 if pd.isna(max_id) else max_id + 1
+        if st.form_submit_button("Kaydet / Güncelle"):
             row = {
-                'id': new_id, 'Tarih': pd.to_datetime(inp_date),
+                'Tarih': pd.to_datetime(inp_date),
                 'Firma': inp_firm, 'Ulke': inp_cntry,
                 'Sales': s, 'Unit': u, 'AdsSpend': sp, 'AdsSales': asales, 'AdsOrder': aorder
             }
-            new_df = calculate_metrics(pd.DataFrame([row]))
-            st.session_state.main_df = pd.concat([st.session_state.main_df, new_df], ignore_index=True)
-            save_db(st.session_state.main_df)
-            st.success("Kaydedildi.")
+            new_df = pd.DataFrame([row])
+            update_database(new_df)
+            st.success("Veritabanı güncellendi.")
 
 # ---------------------------------------------------------
 # MODÜL 3: DÖNEMSEL KARŞILAŞTIRMA (DASHBOARD)
@@ -219,15 +267,13 @@ elif menu == "📊 Dönemsel Karşılaştırma":
     df = st.session_state.main_df.copy()
     
     if df.empty:
-        st.warning("Henüz veri yok.")
+        st.warning("Veritabanı boş.")
     else:
-        # --- TARİH VE FİLTRELER ---
+        # FİLTRELER
         st.sidebar.markdown("---")
-        st.sidebar.header("🗓️ Filtreler")
-        
         today = datetime.date.today()
         start_month = today.replace(day=1)
-        date_range = st.sidebar.date_input("Dönem Seçimi", (start_month, today))
+        date_range = st.sidebar.date_input("Dönem", (start_month, today))
         
         if len(date_range) == 2:
             start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
@@ -262,35 +308,23 @@ elif menu == "📊 Dönemsel Karşılaştırma":
                 df_curr = df_curr[df_curr['Ulke'] == sel_country]
                 df_prev = df_prev[df_prev['Ulke'] == sel_country]
             
-            # --- ÖZELLEŞTİRİLEBİLİR KARŞILAŞTIRMA ---
+            # KARŞILAŞTIRMA SEÇİCİSİ
             st.divider()
             st.subheader("🛠️ Karşılaştırma Paneli")
-            st.caption(f"Seçilen Dönem: {start_date.date()} - {end_date.date()} | Karşılaştırılan: {prev_start.date()} - {prev_end.date()}")
             
-            col_sel, col_empty = st.columns([4, 1])
-            
-            with col_sel:
-                metrics_options = ['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'TACOS', 'ACOS', 'AOV']
-                selected_metrics = st.multiselect(
-                    "Metrikleri Seçin (Karşılaştır butonuna gerek yok, anlık güncellenir):",
-                    metrics_options,
-                    default=['Sales', 'AdsSpend', 'TACOS']
-                )
+            metrics_options = ['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'TACOS', 'ACOS', 'AOV']
+            selected_metrics = st.multiselect("Metrik Seçin:", metrics_options, default=['Sales', 'AdsSpend', 'TACOS'])
             
             if selected_metrics:
-                st.markdown("---")
-                # Dinamik Kolonlar Oluştur
+                st.markdown(f"**{start_date.date()} - {end_date.date()}** vs **{prev_start.date()} - {prev_end.date()}**")
                 cols = st.columns(len(selected_metrics))
                 
                 for idx, metric in enumerate(selected_metrics):
                     with cols[idx]:
-                        # HESAPLAMA MANTIĞI
+                        # Hesaplama
                         if metric in ['TACOS', 'ACOS', 'AOV']:
-                            # Ağırlıklı Ortalama (Doğru Hesap)
                             curr_val = 0
                             prev_val = 0
-                            
-                            # Current
                             if metric == 'TACOS':
                                 curr_val = (df_curr['AdsSpend'].sum() / df_curr['Sales'].sum() * 100) if df_curr['Sales'].sum() > 0 else 0
                                 prev_val = (df_prev['AdsSpend'].sum() / df_prev['Sales'].sum() * 100) if df_prev['Sales'].sum() > 0 else 0
@@ -304,89 +338,60 @@ elif menu == "📊 Dönemsel Karşılaştırma":
                                 prev_val = (df_prev['Sales'].sum() / df_prev['Unit'].sum()) if df_prev['Unit'].sum() > 0 else 0
                                 fmt = "%.2f €"
                         else:
-                            # Toplamsal Metrikler
                             curr_val = df_curr[metric].sum()
                             prev_val = df_prev[metric].sum()
-                            
-                            if metric in ['Sales', 'AdsSpend', 'AdsSales']:
-                                fmt = "%d €"
-                            else:
-                                fmt = "%d" # Adetler için
+                            fmt = "%d €" if metric in ['Sales','AdsSpend','AdsSales'] else "%d"
                         
-                        # Değişim Oranı
-                        delta = curr_val - prev_val
                         percent_change = ((curr_val - prev_val) / prev_val * 100) if prev_val > 0 else 0
+                        delta_color = "inverse" if metric in ['TACOS', 'ACOS'] else "normal"
                         
-                        # Rengi belirle (Tacos/Acos için düşüş iyidir)
-                        if metric in ['TACOS', 'ACOS']:
-                            delta_color = "inverse"
-                        else:
-                            delta_color = "normal"
-                            
-                        # Gösterim
-                        st.metric(
-                            label=metric,
-                            value=fmt % curr_val,
-                            delta=f"{percent_change:.1f}% ({label_prev})",
-                            delta_color=delta_color
-                        )
+                        st.metric(metric, fmt % curr_val, f"{percent_change:.1f}%", delta_color=delta_color)
 
-            # --- DİNAMİK GRAFİK ---
+            # GRAFİK
             if selected_metrics:
                 st.divider()
                 st.subheader("📈 Grafiksel Analiz")
-                
-                # Grafikte gösterilecek veriyi seçtirme
-                plot_metric = st.radio("Grafikte Detaylandırılacak Veri:", selected_metrics, horizontal=True)
+                plot_metric = st.radio("Grafik Verisi:", selected_metrics, horizontal=True)
                 
                 grp = 'Ulke' if sel_firm != "Tümü" else 'Firma'
                 
-                # Veri Hazırlığı (Yardımcı Fonksiyon)
-                def get_plot_data(dframe, metric, label):
-                    if dframe.empty:
-                        return pd.DataFrame(columns=[grp, 'Value', 'Dönem'])
-                        
-                    if metric == 'TACOS':
-                        g = dframe.groupby(grp)[['Sales', 'AdsSpend']].sum().reset_index()
+                # Grafik Verisi Hazırla
+                def get_grp_data(d, m, lbl):
+                    if d.empty: return pd.DataFrame(columns=[grp, 'Value', 'Dönem'])
+                    
+                    if m == 'TACOS':
+                        g = d.groupby(grp)[['Sales', 'AdsSpend']].sum().reset_index()
                         g['Value'] = (g['AdsSpend'] / g['Sales'] * 100).fillna(0)
-                    elif metric == 'ACOS':
-                        g = dframe.groupby(grp)[['AdsSales', 'AdsSpend']].sum().reset_index()
+                    elif m == 'ACOS':
+                        g = d.groupby(grp)[['AdsSales', 'AdsSpend']].sum().reset_index()
                         g['Value'] = (g['AdsSpend'] / g['AdsSales'] * 100).fillna(0)
-                    elif metric == 'AOV':
-                        g = dframe.groupby(grp)[['Sales', 'Unit']].sum().reset_index()
+                    elif m == 'AOV':
+                        g = d.groupby(grp)[['Sales', 'Unit']].sum().reset_index()
                         g['Value'] = (g['Sales'] / g['Unit']).fillna(0)
                     else:
-                        g = dframe.groupby(grp)[metric].sum().reset_index()
-                        g.rename(columns={metric: 'Value'}, inplace=True)
-                    
-                    g['Dönem'] = label
+                        g = d.groupby(grp)[m].sum().reset_index()
+                        g.rename(columns={m: 'Value'}, inplace=True)
+                    g['Dönem'] = lbl
                     return g[[grp, 'Value', 'Dönem']]
 
-                df_plot_curr = get_plot_data(df_curr, plot_metric, "Bu Dönem")
-                df_plot_prev = get_plot_data(df_prev, plot_metric, label_prev)
-                
-                df_chart = pd.concat([df_plot_curr, df_plot_prev], ignore_index=True)
+                df_chart = pd.concat([
+                    get_grp_data(df_curr, plot_metric, "Bu Dönem"),
+                    get_grp_data(df_prev, plot_metric, label_prev)
+                ], ignore_index=True)
                 
                 color_map = {"Bu Dönem": "#00CC96", label_prev: "#EF553B"}
-                
                 fig = px.bar(df_chart, x=grp, y='Value', color='Dönem', barmode='group', 
-                             title=f"{grp} Bazlı {plot_metric} Karşılaştırması",
-                             text_auto='.2s', color_discrete_map=color_map)
+                             title=f"{grp} Bazlı {plot_metric}", text_auto='.2s', 
+                             color_discrete_map=color_map)
                 
-                if plot_metric in ['TACOS', 'ACOS']:
-                    fig.update_layout(yaxis_title="Yüzde (%)")
-                else:
-                    fig.update_layout(yaxis_title="Değer")
-                    
+                if plot_metric in ['TACOS', 'ACOS']: fig.update_layout(yaxis_title="%")
                 st.plotly_chart(fig, use_container_width=True)
 
-            # --- DÜZENLENEBİLİR TABLO ---
+            # DÜZENLEME
             st.divider()
             st.subheader("📝 Veri Detayları ve Düzenleme")
-            st.info("Değişiklik yapıp 'Kaydet' butonuna bastığınızda grafikler ve KPI'lar otomatik güncellenir.")
             
             edit_cols = ['id', 'Tarih', 'Firma', 'Ulke', 'Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'ACOS', 'TACOS', 'AOV']
-            
             edited_df = st.data_editor(
                 df_curr[edit_cols],
                 column_config={
@@ -403,11 +408,15 @@ elif menu == "📊 Dönemsel Karşılaştırma":
             )
             
             if st.button("💾 Değişiklikleri Kaydet"):
+                # Editable'dan gelen veriyi Update fonksiyonuna gönder
+                # Ancak burada ID var, update_database fonksiyonu unique_key'e bakıyor.
+                # En temizi: ID üzerinden ana DB'yi güncellemek.
+                
                 try:
                     master_df = st.session_state.main_df.copy()
                     for index, row in edited_df.iterrows():
                         row_id = row['id']
-                        if pd.isna(row_id): continue # Yeni satır eklenirse
+                        if pd.isna(row_id): continue 
                         
                         mask = master_df['id'] == row_id
                         if mask.any():
@@ -416,9 +425,9 @@ elif menu == "📊 Dönemsel Karşılaştırma":
                                 master_df.loc[mask, c] = row[c]
                     
                     master_df = calculate_metrics(master_df)
+                    master_df.to_csv(DB_FILE, index=False)
                     st.session_state.main_df = master_df
-                    save_db(master_df)
-                    st.success("Veriler ve Oranlar Güncellendi!")
+                    st.success("Güncellendi!")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
