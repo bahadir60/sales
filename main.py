@@ -1,195 +1,155 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine, text
+from datetime import timedelta
 import plotly.express as px
-from datetime import datetime, date
-import re
 
-# --- 1. GÜVENLİK VE GİRİŞ SİSTEMİ ---
-def check_password():
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    if not st.session_state.authenticated:
-        st.title("🔐 Erişim Paneli")
-        user = st.text_input("Kullanıcı Adı")
-        password = st.text_input("Şifre", type="password")
-        if st.button("Giriş Yap"):
-            # Şifrelerinizi buradan güncelleyebilirsiniz
-            if user == "admin" and password == "amazon2025": 
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Hatalı giriş!")
-        return False
-    return True
+# ---------------------------------------------------------
+# 1. VERİ YÜKLEME VE HAZIRLIK (Örnek Veri Seti)
+# ---------------------------------------------------------
+# Not: Gerçek projenizde burayı pd.read_excel veya pd.read_csv ile değiştirin.
+@st.cache_data
+def load_data():
+    # ÖRNEK DATADIR - Kendi dosyanızla değiştirdiğinizde sütun isimlerine dikkat edin.
+    data = {
+        'Tarih': pd.date_range(start='2024-01-01', end='2025-12-31', freq='D'),
+        'Hesap': ['HomeByHome', 'CarpetSale24'] * 365 + ['HomeByHome'], # 731 kayıt
+        'Satis_Adedi': [5, 10, 2, 8, 15, 3] * 121 + [5], # Rastgele sayılar
+        'Ciro': [500, 1000, 200, 800, 1500, 300] * 121 + [500]
+    }
+    df = pd.DataFrame(data)
+    # Tarih sütununu datetime formatına çevirelim
+    df['Tarih'] = pd.to_datetime(df['Tarih'])
+    return df
 
-# --- 2. VERİTABANI BAĞLANTISI (POSTGRESQL / SQLITE) ---
-def get_engine():
-    # Bulut (PostgreSQL) için st.secrets["DATABASE_URL"] kullanılır.
-    # Yerelde test etmek için otomatik SQLite oluşturur.
+df = load_data()
+
+# ---------------------------------------------------------
+# 2. SIDEBAR - FİLTRELEME ALANI
+# ---------------------------------------------------------
+st.sidebar.header("Filtreleme Seçenekleri")
+
+# A) HESAP SEÇİMİ (İsteğiniz üzerine ayrıldı)
+hesap_secimi = st.sidebar.selectbox(
+    "Hesap Seçin:",
+    ("Tümü", "HomeByHome", "CarpetSale24")
+)
+
+# Veriyi hesaba göre filtrele
+if hesap_secimi != "Tümü":
+    df_filtered = df[df['Hesap'] == hesap_secimi]
+else:
+    df_filtered = df.copy()
+
+# B) TARİH SEÇİMİ (Analiz edilecek ay/yıl)
+st.sidebar.write("---")
+st.sidebar.subheader("Dönem Seçimi")
+# Kullanıcıdan bir tarih alalım (Genelde raporlar aylık bakıldığı için ay sonunu seçtirmek mantıklıdır)
+secilen_tarih = st.sidebar.date_input("Analiz Tarihi (Referans)", value=pd.to_datetime("2025-01-01"))
+
+# ---------------------------------------------------------
+# 3. ANA EKRAN VE KPI HESAPLAMALARI
+# ---------------------------------------------------------
+st.title(f"📊 Satış Analizi: {hesap_secimi}")
+
+# Karşılaştırma Fonksiyonu
+def get_metrics(dataframe, target_date):
+    """
+    Seçilen aya ait, bir önceki aya ait ve geçen yılın aynı ayına ait toplamları döndürür.
+    """
+    # Seçilen Ayın Başlangıcı ve Bitişi
+    current_month_start = target_date.replace(day=1)
+    # Bir sonraki ayın ilk gününden 1 çıkararak ay sonunu bulma (Basit yöntem)
+    next_month = current_month_start.replace(day=28) + timedelta(days=4)
+    current_month_end = next_month - timedelta(days=next_month.day)
+
+    # 1. Mevcut Dönem Verisi
+    current_data = dataframe[(dataframe['Tarih'] >= pd.to_datetime(current_month_start)) & 
+                             (dataframe['Tarih'] <= pd.to_datetime(current_month_end))]
+    
+    # 2. Bir Önceki Ay (MoM)
+    prev_month_end = current_month_start - timedelta(days=1)
+    prev_month_start = prev_month_end.replace(day=1)
+    prev_month_data = dataframe[(dataframe['Tarih'] >= pd.to_datetime(prev_month_start)) & 
+                                (dataframe['Tarih'] <= pd.to_datetime(prev_month_end))]
+
+    # 3. Geçen Yıl Aynı Ay (YoY)
+    prev_year_start = current_month_start.replace(year=current_month_start.year - 1)
+    # Şubat ayı kontrolü (Artık yıl)
     try:
-        conn_str = st.secrets.get("DATABASE_URL", "sqlite:///amazon_reports.db")
-        # Render/Heroku/Supabase uyumluluğu için prefix düzeltmesi
-        if conn_str.startswith("postgres://"):
-            conn_str = conn_str.replace("postgres://", "postgresql://", 1)
-        return create_engine(conn_str)
-    except Exception as e:
-        st.error(f"DB Bağlantı Hatası: {e}")
-        return None
-
-def init_db():
-    engine = get_engine()
-    if engine:
-        with engine.begin() as conn:
-            conn.execute(text('''
-                CREATE TABLE IF NOT EXISTS reports (
-                    id SERIAL PRIMARY KEY,
-                    firma TEXT,
-                    ulke TEXT,
-                    baslangic_tarihi DATE,
-                    bitis_tarihi DATE,
-                    ciro FLOAT,
-                    siparis_adeti INTEGER,
-                    reklam_harcamasi FLOAT,
-                    reklamli_satis FLOAT,
-                    tacos FLOAT,
-                    kaynak_dosya TEXT,
-                    kayit_tarihi TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            '''))
-
-# --- 3. AKILLI VERİ İŞLEME MANTĞI ---
-def find_col(df, keywords, exclude=["Artış", "Oran", "Kümülatif", "2024", "Geçen"]):
-    for col in df.columns:
-        col_str = str(col).lower()
-        if any(k.lower() in col_str for k in keywords):
-            if not any(e.lower() in col_str for e in exclude):
-                return col
-    return None
-
-def parse_dates_from_filename(filename):
-    # Dosya adından (Örn: "1-14 Aralık") tarih çıkarmaya çalışır
-    # Varsayılan olarak bugünü döner, geliştirilebilir.
-    return date.today(), date.today()
-
-# --- 4. ANA PROGRAM ---
-st.set_page_config(page_title="Amazon Pro Dashboard", layout="wide", page_icon="📈")
-init_db()
-
-if check_password():
-    st.sidebar.title("📊 Navigasyon")
-    menu = st.sidebar.radio("Menü", ["Dashboard", "Veri Yükleme (Excel/CSV)", "Manuel Giriş", "Veri Yönetimi"])
-    engine = get_engine()
-
-    # --- MODÜL: DASHBOARD ---
-    if menu == "Dashboard":
-        st.header("📈 Performans Analiz Paneli")
-        df = pd.read_sql("SELECT * FROM reports", engine)
+        prev_year_end = current_month_end.replace(year=current_month_end.year - 1)
+    except ValueError:
+        prev_year_end = current_month_end.replace(year=current_month_end.year - 1, day=28)
         
-        if not df.empty:
-            df['baslangic_tarihi'] = pd.to_datetime(df['baslangic_tarihi']).dt.date
-            
-            # Tarih Filtresi
-            st.sidebar.subheader("📅 Tarih Filtresi")
-            min_d, max_d = df['baslangic_tarihi'].min(), df['baslangic_tarihi'].max()
-            selected_dates = st.sidebar.date_input("Dönem Seçin", [min_d, max_d])
-            
-            if len(selected_dates) == 2:
-                f_df = df[(df['baslangic_tarihi'] >= selected_dates[0]) & (df['baslangic_tarihi'] <= selected_dates[1])]
-                
-                # KPI Kartları
-                k1, k2, k3, k4 = st.columns(4)
-                total_rev = f_df['ciro'].sum()
-                total_spend = f_df['reklam_harcamasi'].sum()
-                k1.metric("Toplam Ciro", f"€{total_rev:,.2f}")
-                k2.metric("Reklam Harcaması", f"€{total_spend:,.2f}")
-                k3.metric("Sipariş Adeti", f"{int(f_df['siparis_adeti'].sum()):,}")
-                k4.metric("Ort. TACOS", f"%{(total_spend/total_rev*100 if total_rev > 0 else 0):.2f}")
+    prev_year_data = dataframe[(dataframe['Tarih'] >= pd.to_datetime(prev_year_start)) & 
+                               (dataframe['Tarih'] <= pd.to_datetime(prev_year_end))]
 
-                # Grafikler
-                st.divider()
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    fig1 = px.bar(f_df, x="ulke", y="ciro", color="firma", barmode="group", title="Ülke ve Firma Bazlı Ciro")
-                    st.plotly_chart(fig1, use_container_width=True)
-                with col_b:
-                    fig2 = px.line(f_df.sort_values("baslangic_tarihi"), x="baslangic_tarihi", y="ciro", color="ulke", title="Ciro Trendi")
-                    st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("Henüz veri yok. Lütfen yükleme yapın.")
+    return {
+        "current_sum": current_data['Ciro'].sum(),
+        "prev_month_sum": prev_month_data['Ciro'].sum(),
+        "prev_year_sum": prev_year_data['Ciro'].sum(),
+        "current_count": current_data['Satis_Adedi'].sum(),
+        "date_label": current_month_start.strftime("%B %Y")
+    }
 
-    # --- MODÜL: VERİ YÜKLEME ---
-    elif menu == "Veri Yükleme (Excel/CSV)":
-        st.header("📤 Dosya Aktarımı")
-        uploaded_files = st.file_uploader("Dosyaları Seçin", type=["xlsx", "csv"], accept_multiple_files=True)
+# Metrikleri Hesapla
+metrics = get_metrics(df_filtered, secilen_tarih)
+
+# ---------------------------------------------------------
+# 4. "KARŞILAŞTIR" SEÇENEĞİ VE GÖSTERİM
+# ---------------------------------------------------------
+
+st.write(f"Seçilen Dönem: **{metrics['date_label']}**")
+
+# Kullanıcı "Verileri Karşılaştır" onay kutusunu işaretlerse detayları göster
+karsilastir_aktif = st.checkbox("🔄 Dönemleri Karşılaştır (Geçen Ay ve Geçen Yıl)")
+
+if karsilastir_aktif:
+    st.markdown("### Performans Karşılaştırması")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # Ciro Hesaplamaları
+    ciro_fark_ay = metrics['current_sum'] - metrics['prev_month_sum']
+    ciro_fark_yil = metrics['current_sum'] - metrics['prev_year_sum']
+    
+    with col1:
+        st.metric(
+            label="Mevcut Ciro", 
+            value=f"{metrics['current_sum']:,.2f} TL",
+            delta="Güncel Veri"
+        )
         
-        if st.button("Veritabanına Kaydet") and uploaded_files:
-            for file in uploaded_files:
-                try:
-                    df_temp = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-                    
-                    # Sütun Eşleştirme
-                    c_rev = find_col(df_temp, ["Ciro"])
-                    c_spend = find_col(df_temp, ["Spend", "Harcama"])
-                    c_order = find_col(df_temp, ["Order", "Adeti", "Units"])
-                    c_sales = find_col(df_temp, ["Ad Sales", "Reklamlı Satış"])
-                    c_firma = find_col(df_temp, ["Firma"]) or "HomeByHome"
-                    c_ulke = find_col(df_temp, ["Ülke", "Country"])
-                    
-                    start, end = parse_dates_from_filename(file.name)
-                    
-                    rows = []
-                    for _, row in df_temp.iterrows():
-                        ciro_val = pd.to_numeric(row[c_rev], errors='coerce') if c_rev else 0
-                        if pd.isna(ciro_val) or ciro_val <= 0: continue
-                        
-                        rows.append({
-                            "firma": str(row[c_firma]) if c_rev in df_temp.columns else "Genel",
-                            "ulke": str(row[c_ulke]) if c_ulke else "Bilinmiyor",
-                            "baslangic_tarihi": start,
-                            "bitis_tarihi": end,
-                            "ciro": ciro_val,
-                            "siparis_adeti": int(pd.to_numeric(row[c_order], errors='coerce')) if c_order else 0,
-                            "reklam_harcamasi": pd.to_numeric(row[c_spend], errors='coerce') if c_spend else 0,
-                            "reklamli_satis": pd.to_numeric(row[c_sales], errors='coerce') if c_sales else 0,
-                            "tacos": (pd.to_numeric(row[c_spend], errors='coerce') / ciro_val) if c_spend and ciro_val > 0 else 0,
-                            "kaynak_dosya": file.name
-                        })
-                    
-                    pd.DataFrame(rows).to_sql('reports', engine, if_exists='append', index=False)
-                    st.success(f"✅ {file.name} işlendi.")
-                except Exception as e:
-                    st.error(f"❌ {file.name} hatası: {e}")
+    with col2:
+        st.metric(
+            label="Önceki Ay'a Göre", 
+            value=f"{metrics['prev_month_sum']:,.2f} TL", 
+            delta=f"{ciro_fark_ay:,.2f} TL",
+            delta_color="normal" # Artış yeşil, azalış kırmızı olur otomatik
+        )
+        
+    with col3:
+        st.metric(
+            label="Geçen Yıl Aynı Ay'a Göre", 
+            value=f"{metrics['prev_year_sum']:,.2f} TL", 
+            delta=f"{ciro_fark_yil:,.2f} TL",
+            delta_color="normal"
+        )
+    
+    st.info(f"💡 Not: Bu ay toplam **{metrics['current_count']}** adet satış yapılmıştır.")
 
-    # --- MODÜL: MANUEL GİRİŞ ---
-    elif menu == "Manuel Giriş":
-        st.header("✍️ Manuel Veri Ekleme")
-        with st.form("manual_form"):
-            c1, c2, c3 = st.columns(3)
-            f_name = c1.selectbox("Firma", ["HomeByHome", "CarpetSale24", "Teppium"])
-            u_name = c1.text_input("Ülke (DE, FR vb.)")
-            s_date = c2.date_input("Başlangıç")
-            e_date = c2.date_input("Bitiş")
-            m_ciro = c3.number_input("Ciro (€)", min_value=0.0)
-            m_spend = c3.number_input("Reklam (€)", min_value=0.0)
-            m_order = c3.number_input("Sipariş", min_value=0)
-            
-            if st.form_submit_button("Kaydet"):
-                new_data = pd.DataFrame([{
-                    "firma": f_name, "ulke": u_name, "baslangic_tarihi": s_date, "bitis_tarihi": e_date,
-                    "ciro": m_ciro, "siparis_adeti": m_order, "reklam_harcamasi": m_spend,
-                    "reklamli_satis": 0, "tacos": (m_spend/m_ciro if m_ciro > 0 else 0), "kaynak_dosya": "Manuel"
-                }])
-                new_data.to_sql('reports', engine, if_exists='append', index=False)
-                st.success("Veri eklendi!")
+    # Grafiksel Karşılaştırma
+    st.subheader("Grafiksel Görünüm")
+    comp_df = pd.DataFrame({
+        'Dönem': ['Geçen Yıl Aynı Ay', 'Geçen Ay', 'Bu Ay'],
+        'Ciro': [metrics['prev_year_sum'], metrics['prev_month_sum'], metrics['current_sum']]
+    })
+    
+    fig = px.bar(comp_df, x='Dönem', y='Ciro', text='Ciro', 
+                 title="Dönemsel Ciro Karşılaştırması", color='Dönem')
+    fig.update_traces(texttemplate='%{text:.2s}', textposition='outside')
+    st.plotly_chart(fig, use_container_width=True)
 
-    # --- MODÜL: YÖNETİM ---
-    elif menu == "Veri Yönetimi":
-        st.header("⚙️ Veritabanı Kontrolü")
-        df_all = pd.read_sql("SELECT * FROM reports", engine)
-        st.dataframe(df_all, use_container_width=True)
-        if st.button("🔴 Veritabanını Tamamen Boşalt"):
-            with engine.begin() as conn:
-                conn.execute(text("DELETE FROM reports"))
-            st.warning("Tüm veriler silindi.")
-            st.rerun()
+else:
+    # Karşılaştırma kapalıysa sadece mevcut veriyi tablo olarak göster
+    st.dataframe(df_filtered.tail(10)) # Son 10 veri
+    st.write("Karşılaştırma detaylarını görmek için yukarıdaki kutucuğu işaretleyin.")
