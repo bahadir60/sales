@@ -8,12 +8,12 @@ from dateutil.relativedelta import relativedelta
 # ---------------------------------------------------------
 # SAYFA AYARLARI
 # ---------------------------------------------------------
-st.set_page_config(page_title="E-Ticaret Yönetim Paneli V9", layout="wide", page_icon="🔄")
+st.set_page_config(page_title="E-Ticaret Yönetim Paneli V10", layout="wide", page_icon="🚀")
 
-DB_FILE = 'eticaret_db_pro_v9.csv'
+DB_FILE = 'eticaret_db_pro_v10.csv'
 
 # ---------------------------------------------------------
-# 1. VERİTABANI VE GÜNCELLEME MOTORU
+# 1. VERİTABANI MOTORU
 # ---------------------------------------------------------
 def init_db():
     columns = [
@@ -52,54 +52,37 @@ def calculate_metrics(df):
 
 def update_database(new_df):
     """
-    AKILLI GÜNCELLEME (UPSERT):
-    Aynı Tarih + Firma + Ülke kombinasyonuna sahip eski verileri siler,
-    yerine yeni gelen verileri yazar.
+    UPSERT: Aynı Tarih+Firma+Ülke varsa eskisini sil, yenisini yaz.
     """
-    if new_df.empty:
-        return st.session_state.main_df
+    if new_df.empty: return st.session_state.main_df
 
-    # 1. Mevcut veritabanını al
     current_df = st.session_state.main_df.copy()
-    
-    # Tarih formatlarını garantiye al
     current_df['Tarih'] = pd.to_datetime(current_df['Tarih'])
     new_df['Tarih'] = pd.to_datetime(new_df['Tarih'])
     
-    # 2. Benzersiz Anahtar Oluştur (Tarih_Firma_Ulke)
-    # Bu anahtar sayesinde çakışmaları bulacağız
+    # Benzersiz Anahtar Oluştur
     def create_key(df):
         return df['Tarih'].dt.strftime('%Y-%m-%d') + "_" + df['Firma'].astype(str) + "_" + df['Ulke'].astype(str)
 
     current_df['unique_key'] = create_key(current_df)
     new_df['unique_key'] = create_key(new_df)
     
-    # 3. Çakışan Anahtarları Bul ve Eskileri Sil
+    # Çakışanları Sil
     keys_to_remove = new_df['unique_key'].unique()
-    
-    # Mevcut DB'den, yeni gelen anahtarlara sahip olanları çıkar (Drop Old)
     current_df_cleaned = current_df[~current_df['unique_key'].isin(keys_to_remove)].copy()
     
-    # 4. Temizlenmiş DB ile Yeni Veriyi Birleştir
-    # unique_key sütununu artık kaldırabiliriz
-    if 'unique_key' in current_df_cleaned.columns:
-        current_df_cleaned = current_df_cleaned.drop(columns=['unique_key'])
-    if 'unique_key' in new_df.columns:
-        new_df = new_df.drop(columns=['unique_key'])
+    # Temizlik
+    if 'unique_key' in current_df_cleaned.columns: current_df_cleaned = current_df_cleaned.drop(columns=['unique_key'])
+    if 'unique_key' in new_df.columns: new_df = new_df.drop(columns=['unique_key'])
         
     final_df = pd.concat([current_df_cleaned, new_df], ignore_index=True)
-    
-    # ID'leri Yeniden Sırala
     final_df['id'] = range(1, len(final_df) + 1)
     
-    # 5. Hesapla ve Kaydet
     final_df = calculate_metrics(final_df)
     final_df.to_csv(DB_FILE, index=False)
-    
-    # Session State Güncelle
     st.session_state.main_df = final_df
     
-    return len(keys_to_remove) # Kaç kayıt güncellendi bilgisini dön
+    return len(keys_to_remove)
 
 def clean_currency(x):
     if isinstance(x, str):
@@ -110,7 +93,6 @@ def clean_currency(x):
             return 0.0
     return x
 
-# Türkçe Ay Mapping
 AYLAR_TR = {
     'OCAK': 1, 'SUBAT': 2, 'MART': 3, 'NISAN': 4, 'MAYIS': 5, 'HAZIRAN': 6,
     'TEMMUZ': 7, 'AGUSTOS': 8, 'EYLUL': 9, 'EKIM': 10, 'KASIM': 11, 'ARALIK': 12
@@ -129,8 +111,8 @@ menu = st.sidebar.radio("Seçim:", ["📊 Dönemsel Karşılaştırma", "📤 Ex
 # MODÜL 1: EXCEL YÜKLEME
 # ---------------------------------------------------------
 if menu == "📤 Excel Yükle":
-    st.title("📤 Akıllı Excel Yükleyici (Overwrite Modu)")
-    st.info("ℹ️ Aynı döneme (Tarih+Firma+Ülke) ait veri yüklerseniz, eski veriler silinip yenileri kaydedilir.")
+    st.title("📤 Akıllı Excel Yükleyici")
+    st.info("ℹ️ Aynı tarih ve firma verisi yüklenirse, eski veri güncellenir (Overwrite).")
     
     uploaded_file = st.file_uploader("Dosya Seç", type=["xlsx", "xls"])
 
@@ -195,7 +177,7 @@ if menu == "📤 Excel Yükle":
                 map_ao24 = st.selectbox("2024 Ads Order", cols, index=get_col(['2024 ads order'], cols))
 
             if st.button("💾 Veritabanını Güncelle"):
-                # 2025 Hazırlığı
+                # 2025
                 df_2025 = pd.DataFrame()
                 df_2025['Firma'] = df_temp[map_firm]
                 df_2025['Ulke'] = df_temp[map_country]
@@ -203,7 +185,7 @@ if menu == "📤 Excel Yükle":
                 for c, m in zip(['Sales','Unit','AdsSpend','AdsSales','AdsOrder'], [map_s25, map_u25, map_sp25, map_as25, map_ao25]):
                     df_2025[c] = df_temp[m].apply(clean_currency)
                 
-                # 2024 Hazırlığı
+                # 2024
                 df_2024 = pd.DataFrame()
                 df_2024['Firma'] = df_temp[map_firm]
                 df_2024['Ulke'] = df_temp[map_country]
@@ -211,18 +193,16 @@ if menu == "📤 Excel Yükle":
                 for c, m in zip(['Sales','Unit','AdsSpend','AdsSales','AdsOrder'], [map_s24, map_u24, map_sp24, map_as24, map_ao24]):
                     df_2024[c] = df_temp[m].apply(clean_currency)
                 
-                # Birleştirme ve Temizlik
                 combined = pd.concat([df_2025, df_2024], ignore_index=True)
                 combined = combined.dropna(subset=['Firma'])
                 combined = combined[combined['Sales'] > 0]
                 combined = combined[~combined['Firma'].astype(str).str.contains('Toplam', case=False)]
                 
-                # VERİTABANI GÜNCELLEME (Overwrite Logic)
                 updated_count = update_database(combined)
                 
-                st.success(f"✅ İşlem Başarılı! {len(combined)} satır işlendi.")
+                st.success(f"✅ İşlem Tamamlandı! {len(combined)} satır işlendi.")
                 if updated_count > 0:
-                    st.warning(f"⚠️ Dikkat: {updated_count} adet eski kayıt güncellendi/üzerine yazıldı.")
+                    st.warning(f"⚠️ {updated_count} adet eski kayıt güncellendi.")
 
         except Exception as e:
             st.error(f"Hata: {e}")
@@ -232,8 +212,6 @@ if menu == "📤 Excel Yükle":
 # ---------------------------------------------------------
 elif menu == "📝 Manuel Giriş":
     st.title("📝 Manuel Giriş")
-    st.caption("Aynı tarihe ve firmaya ait giriş yaparsanız eski veri güncellenir.")
-    
     with st.form("manuel"):
         c1, c2, c3 = st.columns(3)
         inp_date = c1.date_input("Tarih", datetime.date.today())
@@ -255,8 +233,7 @@ elif menu == "📝 Manuel Giriş":
                 'Firma': inp_firm, 'Ulke': inp_cntry,
                 'Sales': s, 'Unit': u, 'AdsSpend': sp, 'AdsSales': asales, 'AdsOrder': aorder
             }
-            new_df = pd.DataFrame([row])
-            update_database(new_df)
+            update_database(pd.DataFrame([row]))
             st.success("Veritabanı güncellendi.")
 
 # ---------------------------------------------------------
@@ -271,13 +248,17 @@ elif menu == "📊 Dönemsel Karşılaştırma":
     else:
         # FİLTRELER
         st.sidebar.markdown("---")
+        st.sidebar.header("🗓️ Filtreler")
+        
         today = datetime.date.today()
         start_month = today.replace(day=1)
-        date_range = st.sidebar.date_input("Dönem", (start_month, today))
+        
+        # Filtrelerin hafızada kalması için 'key' parametreleri eklendi
+        date_range = st.sidebar.date_input("Dönem", (start_month, today), key='filter_date')
         
         if len(date_range) == 2:
             start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-            comp_mode = st.sidebar.radio("Karşılaştırma:", ["Geçen Yıl (YoY)", "Geçen Ay (MoM)"])
+            comp_mode = st.sidebar.radio("Karşılaştırma:", ["Geçen Yıl (YoY)", "Geçen Ay (MoM)"], key='filter_comp_mode')
             
             if comp_mode == "Geçen Yıl (YoY)":
                 prev_start = start_date - relativedelta(years=1)
@@ -290,9 +271,10 @@ elif menu == "📊 Dönemsel Karşılaştırma":
                 label_prev = "Önceki Dönem"
             
             firms = ["Tümü"] + list(df['Firma'].unique())
-            sel_firm = st.sidebar.selectbox("Firma", firms)
+            sel_firm = st.sidebar.selectbox("Firma", firms, key='filter_firm') # Key eklendi
+            
             countries = ["Tümü"] + list(df['Ulke'].unique())
-            sel_country = st.sidebar.selectbox("Ülke", countries)
+            sel_country = st.sidebar.selectbox("Ülke", countries, key='filter_country') # Key eklendi
             
             # Veri Süzme
             mask_curr = (df['Tarih'] >= start_date) & (df['Tarih'] <= end_date)
@@ -313,7 +295,12 @@ elif menu == "📊 Dönemsel Karşılaştırma":
             st.subheader("🛠️ Karşılaştırma Paneli")
             
             metrics_options = ['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'TACOS', 'ACOS', 'AOV']
-            selected_metrics = st.multiselect("Metrik Seçin:", metrics_options, default=['Sales', 'AdsSpend', 'TACOS'])
+            # Default değerler güncellendi
+            selected_metrics = st.multiselect(
+                "Metrikleri Seçin:",
+                metrics_options,
+                default=['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'TACOS']
+            )
             
             if selected_metrics:
                 st.markdown(f"**{start_date.date()} - {end_date.date()}** vs **{prev_start.date()} - {prev_end.date()}**")
@@ -322,9 +309,11 @@ elif menu == "📊 Dönemsel Karşılaştırma":
                 for idx, metric in enumerate(selected_metrics):
                     with cols[idx]:
                         # Hesaplama
+                        curr_val = 0
+                        prev_val = 0
+                        
                         if metric in ['TACOS', 'ACOS', 'AOV']:
-                            curr_val = 0
-                            prev_val = 0
+                            # Ağırlıklı Ortalama
                             if metric == 'TACOS':
                                 curr_val = (df_curr['AdsSpend'].sum() / df_curr['Sales'].sum() * 100) if df_curr['Sales'].sum() > 0 else 0
                                 prev_val = (df_prev['AdsSpend'].sum() / df_prev['Sales'].sum() * 100) if df_prev['Sales'].sum() > 0 else 0
@@ -338,6 +327,7 @@ elif menu == "📊 Dönemsel Karşılaştırma":
                                 prev_val = (df_prev['Sales'].sum() / df_prev['Unit'].sum()) if df_prev['Unit'].sum() > 0 else 0
                                 fmt = "%.2f €"
                         else:
+                            # Toplam
                             curr_val = df_curr[metric].sum()
                             prev_val = df_prev[metric].sum()
                             fmt = "%d €" if metric in ['Sales','AdsSpend','AdsSales'] else "%d"
@@ -389,7 +379,7 @@ elif menu == "📊 Dönemsel Karşılaştırma":
 
             # DÜZENLEME
             st.divider()
-            st.subheader("📝 Veri Detayları ve Düzenleme")
+            st.subheader("📝 Veri Düzenleme")
             
             edit_cols = ['id', 'Tarih', 'Firma', 'Ulke', 'Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'ACOS', 'TACOS', 'AOV']
             edited_df = st.data_editor(
@@ -408,10 +398,6 @@ elif menu == "📊 Dönemsel Karşılaştırma":
             )
             
             if st.button("💾 Değişiklikleri Kaydet"):
-                # Editable'dan gelen veriyi Update fonksiyonuna gönder
-                # Ancak burada ID var, update_database fonksiyonu unique_key'e bakıyor.
-                # En temizi: ID üzerinden ana DB'yi güncellemek.
-                
                 try:
                     master_df = st.session_state.main_df.copy()
                     for index, row in edited_df.iterrows():
