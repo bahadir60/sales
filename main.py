@@ -1,31 +1,45 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import io
+import os
+import datetime
 
 # ---------------------------------------------------------
 # SAYFA AYARLARI
 # ---------------------------------------------------------
-st.set_page_config(page_title="Aylık E-Ticaret Raporu", layout="wide", page_icon="📅")
+st.set_page_config(page_title="E-Ticaret Veri Yönetim Paneli", layout="wide", page_icon="💾")
+
+# Veritabanı Dosya Adı
+DB_FILE = 'eticaret_veritabani.csv'
 
 # ---------------------------------------------------------
-# 1. FONKSİYONLAR
+# 1. VERİTABANI YÖNETİM FONKSİYONLARI
 # ---------------------------------------------------------
-@st.cache_data
-def load_excel_file(uploaded_file):
-    """Excel dosyasındaki TÜM sayfaları (sheet) okur."""
-    try:
-        # sheet_name=None parametresi tüm sekmeleri sözlük (dict) olarak okur
-        xls = pd.read_excel(uploaded_file, sheet_name=None)
-        return xls
-    except Exception as e:
-        st.error(f"Dosya okunamadı: {e}")
-        return None
+def init_db():
+    """Veritabanı dosyası yoksa oluşturur, varsa yükler."""
+    if not os.path.exists(DB_FILE):
+        df = pd.DataFrame(columns=['Tarih', 'Ay', 'Firma', 'Ülke', 'Ciro', 'GecenYilCiro', 'Order', 'Reklam', 'TACOS'])
+        df.to_csv(DB_FILE, index=False)
+        return df
+    else:
+        return pd.read_csv(DB_FILE)
+
+def save_to_db(new_data):
+    """Yeni veriyi mevcut veritabanına ekler ve kaydeder."""
+    current_db = pd.read_csv(DB_FILE)
+    updated_db = pd.concat([current_db, new_data], ignore_index=True)
+    updated_db.to_csv(DB_FILE, index=False)
+    return updated_db
+
+def reset_db():
+    """Veritabanını sıfırlar."""
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+    init_db()
 
 def clean_currency(x):
-    """Metin formatındaki parayı (1.200 TL) sayıya (1200.0) çevirir."""
+    """Metin formatındaki sayıları temizler."""
     if isinstance(x, str):
-        # TL, %, harf ve boşlukları temizle. Virgülü noktaya çevir.
         clean_str = x.replace('TL', '').replace('₺', '').replace('%', '').replace('.', '').replace(',', '.').strip()
         try:
             return float(clean_str)
@@ -33,216 +47,245 @@ def clean_currency(x):
             return 0.0
     return x
 
-def get_idx(keywords, columns):
-    """Sütun ismini tahmin etmeye yarayan yardımcı fonksiyon"""
-    for i, c in enumerate(columns):
-        if any(k in str(c).lower() for k in keywords):
-            return i
-    return 0
+# Uygulama Başlangıcında DB Kontrolü
+if 'main_df' not in st.session_state:
+    st.session_state.main_df = init_db()
 
 # ---------------------------------------------------------
-# 2. SIDEBAR - DOSYA VE AY SEÇİMİ
+# 2. SIDEBAR - MENÜ GEÇİŞLERİ
 # ---------------------------------------------------------
-st.sidebar.title("🗂️ Rapor Yönetimi")
+st.sidebar.title("🎛️ Kontrol Paneli")
 
-uploaded_file = st.sidebar.file_uploader("Excel Raporunu Yükle", type=["xlsx", "xls"])
-
-if st.sidebar.button("⚠️ Paneli Temizle"):
-    st.cache_data.clear()
-    st.rerun()
+menu = st.sidebar.radio(
+    "Menü Seçimi:",
+    ["📊 Analiz Paneli (Dashboard)", "📤 Excel'den Veri Yükle", "📝 Manuel Veri Girişi", "⚙️ Ayarlar"]
+)
 
 # ---------------------------------------------------------
-# 3. ANA MANTIK VE GÖRÜNÜM
+# MODÜL 1: EXCEL'DEN VERİ YÜKLEME (IMPORT)
 # ---------------------------------------------------------
+if menu == "📤 Excel'den Veri Yükle":
+    st.title("📤 Excel Verilerini Veritabanına Aktar")
+    st.info("Buradan yüklediğiniz Excel dosyasındaki verileri kalıcı hafızaya kaydedebilirsiniz.")
 
-if uploaded_file:
-    # Tüm sekmeleri oku
-    all_sheets = load_excel_file(uploaded_file)
-    
-    if all_sheets:
-        st.sidebar.divider()
-        st.sidebar.subheader("1. Ay Seçimi")
-        
-        # Excel'deki sekme isimlerini listele (Örn: OCAK, ŞUBAT, MART...)
-        sheet_names = list(all_sheets.keys())
-        selected_sheet = st.sidebar.selectbox("Analiz Edilecek Ayı Seçin:", sheet_names)
-        
-        # Seçilen ayın verisini al
-        df = all_sheets[selected_sheet].copy()
-        
-        # --- VERİ TEMİZLİĞİ ---
-        # İlk satırlar bazen boş olabilir veya başlıklar kaymış olabilir.
-        # Genelde başlıklar "Firma" kelimesinin olduğu satırdadır.
-        # Bu basit bir kontrolle başlık satırını bulmaya çalışalım:
-        
-        # Eğer ilk sütunda 'Firma' yazmıyorsa, yazan satırı bulana kadar atla (Opsiyonel gelişmiş özellik)
-        # Şimdilik standart okuma varsayıyoruz.
-        
-        # Boşlukları temizle
-        df.columns = df.columns.str.strip()
-        df = df.dropna(how='all') # Tamamen boş satırları sil
-        
-        cols = df.columns.tolist()
-        
-        # -----------------------------------------------------
-        # SÜTUN EŞLEŞTİRME (MAPPING) - AY BAZLI
-        # -----------------------------------------------------
-        st.sidebar.divider()
-        st.sidebar.subheader("2. Sütun Eşleştirme")
-        st.sidebar.info(f"'{selected_sheet}' sayfası için sütunları doğrulayın:")
-        
-        # 1. KATEGORİLER
-        idx_hesap = get_idx(['firma', 'hesap', 'account', 'marka'], cols)
-        idx_ulke = get_idx(['ülke', 'country', 'region'], cols)
-        
-        c_hesap = st.sidebar.selectbox("Firma/Hesap", cols, index=idx_hesap)
-        c_ulke = st.sidebar.selectbox("Ülke", cols, index=idx_ulke)
-        
-        # 2. METRİKLER (BU YIL)
-        st.sidebar.markdown("**Bu Yılın Verileri**")
-        idx_ciro = get_idx(['ciro', 'sales', 'tutar', '2025', 'revenue'], cols) # '2025' öncelikli
-        idx_order = get_idx(['order', 'adet', 'qty', '2025'], cols)
-        idx_spend = get_idx(['reklam harcama', 'spend', 'cost'], cols)
-        idx_tacos = get_idx(['tacos', 'acos'], cols)
-        
-        c_ciro = st.sidebar.selectbox("Ciro (Bu Yıl)", cols, index=idx_ciro)
-        c_order = st.sidebar.selectbox("Order (Bu Yıl)", cols, index=idx_order)
-        c_spend = st.sidebar.selectbox("Reklam Harcaması", cols, index=idx_spend)
-        c_tacos = st.sidebar.selectbox("TACOS (%)", cols, index=idx_tacos)
+    uploaded_file = st.file_uploader("Excel Dosyası Seçin", type=["xlsx", "xls"])
 
-        # 3. METRİKLER (GEÇEN YIL - KARŞILAŞTIRMA İÇİN)
-        st.sidebar.markdown("**Geçen Yıl (2024) Verileri**")
-        # Geçen yılı bulmak için '2024' veya 'geçen' kelimesini arıyoruz
-        # Ancak yukarıdaki 'ciro' seçiminden farklı olmalı.
-        possible_prev_ciro = [i for i, c in enumerate(cols) if ('2024' in str(c) or 'geçen' in str(c).lower()) and 'ciro' in str(c).lower()]
-        idx_prev_ciro = possible_prev_ciro[0] if possible_prev_ciro else 0
-        
-        c_prev_ciro = st.sidebar.selectbox("Ciro (Geçen Yıl/2024)", cols, index=idx_prev_ciro)
-
-        # -----------------------------------------------------
-        # VERİ İŞLEME
-        # -----------------------------------------------------
-        # Seçilen sütunları temizle ve sayıya çevir
-        numeric_cols = [c_ciro, c_order, c_spend, c_tacos, c_prev_ciro]
-        
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col].apply(clean_currency), errors='coerce').fillna(0)
+    if uploaded_file:
+        try:
+            xls = pd.read_excel(uploaded_file, sheet_name=None)
+            sheet_names = list(xls.keys())
             
-        # -----------------------------------------------------
-        # DASHBOARD EKRANI
-        # -----------------------------------------------------
-        st.title(f"📊 {selected_sheet} Ayı Performans Analizi")
+            st.write("---")
+            c1, c2 = st.columns(2)
+            selected_sheet = c1.selectbox("Hangi Sekme (Ay) Yüklenecek?", sheet_names)
+            
+            # Seçilen sekmeyi oku
+            df_temp = xls[selected_sheet].copy()
+            df_temp = df_temp.dropna(how='all')
+            cols = df_temp.columns.tolist()
+            
+            # Sütun Eşleştirme
+            st.subheader("🔗 Sütun Eşleştirme")
+            st.caption("Excel'deki sütunları sistemdeki karşılıklarıyla eşleştirin.")
+            
+            def get_idx(keys, columns):
+                for i, c in enumerate(columns):
+                    if any(k in str(c).lower() for k in keys): return i
+                return 0
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                map_firma = st.selectbox("Firma Sütunu", cols, index=get_idx(['firma', 'hesap'], cols))
+                map_ulke = st.selectbox("Ülke Sütunu", cols, index=get_idx(['ülke', 'country'], cols))
+                # Ay bilgisini kullanıcıdan manuel alabiliriz veya sheet isminden
+                secilen_ay = st.text_input("Bu veriler hangi Ay/Dönem için?", value=selected_sheet)
+                
+            with col2:
+                map_ciro = st.selectbox("Ciro (Bu Yıl)", cols, index=get_idx(['ciro', 'sales', '2025'], cols))
+                map_prev_ciro = st.selectbox("Ciro (Geçen Yıl)", cols, index=get_idx(['2024', 'geçen'], cols))
+                map_order = st.selectbox("Order (Adet)", cols, index=get_idx(['order', 'adet'], cols))
+                
+            with col3:
+                map_spend = st.selectbox("Reklam Harcaması", cols, index=get_idx(['reklam', 'spend'], cols))
+                map_tacos = st.selectbox("TACOS (%)", cols, index=get_idx(['tacos', 'acos'], cols))
+            
+            # ÖNİZLEME VE KAYIT
+            st.write("---")
+            if st.button("💾 Verileri Kaydet ve Veritabanına Ekle"):
+                # Yeni dataframe oluştur (Standardize et)
+                new_data = pd.DataFrame()
+                new_data['Firma'] = df_temp[map_firma]
+                new_data['Ülke'] = df_temp[map_ulke]
+                new_data['Ciro'] = df_temp[map_ciro].apply(clean_currency)
+                new_data['GecenYilCiro'] = df_temp[map_prev_ciro].apply(clean_currency)
+                new_data['Order'] = df_temp[map_order].apply(clean_currency)
+                new_data['Reklam'] = df_temp[map_spend].apply(clean_currency)
+                new_data['TACOS'] = df_temp[map_tacos].apply(clean_currency)
+                
+                # Tarih ve Ay bilgisi ekle
+                new_data['Ay'] = secilen_ay
+                new_data['Tarih'] = datetime.date.today() # Yükleme tarihi
+                
+                # Boş satırları ve 0 ciroları temizle (İsteğe bağlı)
+                new_data = new_data[new_data['Ciro'] > 0]
+                
+                # Veritabanına yaz
+                updated_df = save_to_db(new_data)
+                st.session_state.main_df = updated_df
+                
+                st.success(f"✅ {len(new_data)} satır veri başarıyla kaydedildi!")
+                st.dataframe(new_data.head())
+
+        except Exception as e:
+            st.error(f"Hata oluştu: {e}")
+
+# ---------------------------------------------------------
+# MODÜL 2: MANUEL VERİ GİRİŞİ
+# ---------------------------------------------------------
+elif menu == "📝 Manuel Veri Girişi":
+    st.title("📝 Manuel Veri Girişi")
+    st.info("Excel dosyanız yoksa verileri buradan elle girip kaydedebilirsiniz.")
+
+    with st.form("manuel_form"):
+        c1, c2 = st.columns(2)
+        inp_ay = c1.selectbox("Dönem/Ay", ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", 
+                                           "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"])
+        inp_tarih = c2.date_input("İşlem Tarihi", datetime.date.today())
         
-        # FİLTRELER
-        col_f1, col_f2 = st.columns(2)
+        c3, c4 = st.columns(2)
+        inp_firma = c3.text_input("Firma Adı", "HomeByHome")
+        inp_ulke = c4.text_input("Ülke", "DE")
         
-        # Filtre listelerini oluştur (string'e çevirerek hata önle)
-        hesaplar = ["Tümü"] + sorted(df[c_hesap].dropna().astype(str).unique().tolist())
-        ulkeler = ["Tümü"] + sorted(df[c_ulke].dropna().astype(str).unique().tolist())
+        st.write("---")
+        m1, m2, m3 = st.columns(3)
+        inp_ciro = m1.number_input("Ciro (Bu Yıl)", min_value=0.0, step=100.0)
+        inp_prev = m2.number_input("Ciro (Geçen Yıl)", min_value=0.0, step=100.0)
+        inp_order = m3.number_input("Order (Adet)", min_value=0, step=1)
         
-        sel_hesap = col_f1.selectbox("Firma Filtrele:", hesaplar)
-        sel_ulke = col_f2.selectbox("Ülke Filtrele:", ulkeler)
+        m4, m5 = st.columns(2)
+        inp_reklam = m4.number_input("Reklam Harcaması", min_value=0.0)
+        inp_tacos = m5.number_input("TACOS (%)", min_value=0.0, step=0.1)
+        
+        submitted = st.form_submit_button("💾 Kaydet")
+        
+        if submitted:
+            # Tek satırlık veri oluştur
+            row = {
+                'Tarih': inp_tarih,
+                'Ay': inp_ay,
+                'Firma': inp_firma,
+                'Ülke': inp_ulke,
+                'Ciro': inp_ciro,
+                'GecenYilCiro': inp_prev,
+                'Order': inp_order,
+                'Reklam': inp_reklam,
+                'TACOS': inp_tacos
+            }
+            new_df = pd.DataFrame([row])
+            
+            # Kaydet
+            updated_df = save_to_db(new_df)
+            st.session_state.main_df = updated_df
+            st.success("✅ Veri başarıyla veritabanına eklendi.")
+
+# ---------------------------------------------------------
+# MODÜL 3: ANALİZ PANELİ (DASHBOARD)
+# ---------------------------------------------------------
+elif menu == "📊 Analiz Paneli (Dashboard)":
+    st.title("📊 Yönetim Raporu")
+    
+    # Veritabanını Oku
+    df = st.session_state.main_df
+    
+    if df.empty:
+        st.warning("Veritabanında henüz veri yok. Lütfen 'Excel Yükle' veya 'Manuel Giriş' menüsünü kullanın.")
+    else:
+        # --- FİLTRELER ---
+        st.sidebar.markdown("---")
+        st.sidebar.header("Filtreler")
+        
+        # Ay Filtresi
+        aylar = ["Tümü"] + list(df['Ay'].unique())
+        sel_ay = st.sidebar.selectbox("Dönem Seçin:", aylar)
+        
+        # Firma Filtresi
+        firmalar = ["Tümü"] + list(df['Firma'].unique())
+        sel_firma = st.sidebar.selectbox("Firma Seçin:", firmalar)
         
         # Veriyi Süz
         df_viz = df.copy()
-        if sel_hesap != "Tümü": 
-            df_viz = df_viz[df_viz[c_hesap].astype(str) == sel_hesap]
-        if sel_ulke != "Tümü": 
-            df_viz = df_viz[df_viz[c_ulke].astype(str) == sel_ulke]
+        if sel_ay != "Tümü":
+            df_viz = df_viz[df_viz['Ay'] == sel_ay]
+        if sel_firma != "Tümü":
+            df_viz = df_viz[df_viz['Firma'] == sel_firma]
             
-        st.markdown("---")
+        # --- ÖZET METRİKLER ---
+        toplam_ciro = df_viz['Ciro'].sum()
+        toplam_gecen = df_viz['GecenYilCiro'].sum()
+        toplam_order = df_viz['Order'].sum()
+        toplam_reklam = df_viz['Reklam'].sum()
+        ort_tacos = df_viz['TACOS'].mean()
         
-        # KPI KARTLARI
-        # Toplamları hesapla
-        toplam_ciro = df_viz[c_ciro].sum()
-        toplam_gecen_ciro = df_viz[c_prev_ciro].sum()
-        toplam_order = df_viz[c_order].sum()
-        toplam_spend = df_viz[c_spend].sum()
-        ort_tacos = df_viz[c_tacos].mean()
+        diff = toplam_ciro - toplam_gecen
+        growth = (diff / toplam_gecen * 100) if toplam_gecen > 0 else 0
         
-        # Büyüme Oranı Hesapla
-        buyume_orani = ((toplam_ciro - toplam_gecen_ciro) / toplam_gecen_ciro * 100) if toplam_gecen_ciro > 0 else 0
-        fark_tl = toplam_ciro - toplam_gecen_ciro
-
         k1, k2, k3, k4, k5 = st.columns(5)
-        
-        k1.metric("Ciro (Bu Yıl)", f"{toplam_ciro:,.0f} TL", f"%{buyume_orani:.1f}")
-        k2.metric("Ciro (Geçen Yıl)", f"{toplam_gecen_ciro:,.0f} TL", f"{fark_tl:,.0f} TL Fark", delta_color="normal")
-        k3.metric("Toplam Order", f"{toplam_order:,.0f}")
-        k4.metric("Reklam Harcaması", f"{toplam_spend:,.0f} TL")
+        k1.metric("Toplam Ciro", f"{toplam_ciro:,.0f} TL", f"%{growth:.1f}")
+        k2.metric("Geçen Yıl Ciro", f"{toplam_gecen:,.0f} TL", f"{diff:,.0f} TL")
+        k3.metric("Order", f"{toplam_order:,.0f}")
+        k4.metric("Reklam Harcama", f"{toplam_reklam:,.0f} TL")
         k5.metric("Ort. TACOS", f"%{ort_tacos:.1f}")
         
         st.markdown("---")
         
-        # GRAFİKLER
-        col_g_sol, col_g_sag = st.columns([2, 1])
+        # --- GRAFİKLER ---
+        c_grafik1, c_grafik2 = st.columns([2, 1])
         
-        with col_g_sol:
-            st.subheader("📈 Karşılaştırmalı Performans")
+        with c_grafik1:
+            st.subheader("📈 Karşılaştırmalı Ciro Analizi")
+            # Gruplama (Ay seçiliyse Ülkeye göre, değilse Aya göre)
+            grp = 'Ülke' if sel_ay != "Tümü" else 'Ay'
             
-            # Gruplama Sütunu Belirle (Tek firma seçildiyse ülkeye göre, değilse firmaya göre)
-            grp_col = c_ulke if sel_hesap != "Tümü" else c_hesap
-            grp_name = "Ülke" if sel_hesap != "Tümü" else "Firma"
+            chart_data = df_viz.groupby(grp)[['Ciro', 'GecenYilCiro']].sum().reset_index()
+            chart_melt = chart_data.melt(id_vars=grp, var_name='Dönem', value_name='Tutar')
             
-            # Veriyi Hazırla
-            chart_data = df_viz.groupby(grp_col)[[c_ciro, c_prev_ciro]].sum().reset_index()
-            
-            # İsimleri grafikte güzel görünsün diye değiştir
-            chart_data = chart_data.rename(columns={c_ciro: 'Bu Yıl', c_prev_ciro: 'Geçen Yıl'})
-            
-            # Melt (Uzun format)
-            chart_melt = chart_data.melt(id_vars=grp_col, var_name='Dönem', value_name='Tutar')
-            
-            fig = px.bar(
-                chart_melt, 
-                x=grp_col, 
-                y='Tutar', 
-                color='Dönem', 
-                barmode='group',
-                text_auto='.2s',
-                title=f"{grp_name} Bazlı Ciro Karşılaştırması (Bu Yıl vs Geçen Yıl)",
-                color_discrete_map={'Bu Yıl': '#00CC96', 'Geçen Yıl': '#EF553B'}
-            )
+            fig = px.bar(chart_melt, x=grp, y='Tutar', color='Dönem', barmode='group', 
+                         title=f"{grp} Bazlı Dağılım", text_auto='.2s',
+                         color_discrete_map={'Ciro': '#00CC96', 'GecenYilCiro': '#EF553B'})
             st.plotly_chart(fig, use_container_width=True)
             
-        with col_g_sag:
-            st.subheader("📊 Gider Analizi")
-            # Reklam harcaması vs Ciro scatter plot veya Pie chart
+        with c_grafik2:
+            st.subheader("🌍 Ülke Dağılımı")
             if toplam_ciro > 0:
-                # Pasta grafik için veri
-                pie_df = df_viz.groupby(grp_col)[c_ciro].sum().reset_index()
-                fig2 = px.pie(pie_df, values=c_ciro, names=grp_col, hole=0.4, title=f"{grp_name} Payları")
+                fig2 = px.pie(df_viz, values='Ciro', names='Ülke', hole=0.4)
                 st.plotly_chart(fig2, use_container_width=True)
-            else:
-                st.info("Grafik için veri yetersiz.")
+                
+        # --- DETAY TABLO ---
+        with st.expander("📋 Kayıtlı Verileri Görüntüle", expanded=True):
+            st.dataframe(df_viz, use_container_width=True)
 
-        # DETAY TABLO
-        st.markdown("---")
-        with st.expander("📋 Detaylı Veri Tablosunu Göster", expanded=True):
-            # Tabloda gösterilecek sütunları düzenle
-            show_cols = [c_hesap, c_ulke, c_ciro, c_prev_ciro, c_order, c_spend, c_tacos]
-            
-            # Sütun isimlerini daha okunur yapalım
-            display_df = df_viz[show_cols].rename(columns={
-                c_hesap: 'Firma',
-                c_ulke: 'Ülke',
-                c_ciro: '2025 Ciro',
-                c_prev_ciro: '2024 Ciro',
-                c_order: 'Order',
-                c_spend: 'Reklam',
-                c_tacos: 'TACOS'
-            })
-            
-            st.dataframe(display_df, use_container_width=True)
-            
-else:
-    # Dosya yüklenmediyse karşılama ekranı
-    st.info("👆 Lütfen sol menüden aylık sekmeler içeren Excel dosyanızı yükleyin.")
+# ---------------------------------------------------------
+# MODÜL 4: AYARLAR (VERİTABANI YÖNETİMİ)
+# ---------------------------------------------------------
+elif menu == "⚙️ Ayarlar":
+    st.title("⚙️ Sistem Ayarları")
     
-    st.markdown("""
-    ### Bu Panel Nasıl Çalışır?
-    1. **Excel Yükle:** İçinde 'OCAK', 'ŞUBAT' gibi sekmeler olan dosyanızı yükleyin.
-    2. **Ay Seçin:** Sol menüden analiz etmek istediğiniz sekmeyi seçin.
-    3. **Sütunları Onaylayın:** Her ayın sütun isimleri farklı olabilir, sol menüden doğru sütunların seçili olduğundan emin olun.
-    4. **Analiz Edin:** 2024 vs 2025 karşılaştırması ve ülke bazlı kırılımlar otomatik oluşacaktır.
-    """)
+    st.warning("Buradaki işlemler geri alınamaz.")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write(f"📂 Mevcut Veritabanı: `{DB_FILE}`")
+        if os.path.exists(DB_FILE):
+            df = pd.read_csv(DB_FILE)
+            st.write(f"Toplam Kayıt Sayısı: **{len(df)}**")
+            
+            # İndirme Butonu
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Veritabanını İndir (Yedek)", csv, "yedek_veritabani.csv", "text/csv")
+            
+    with c2:
+        if st.button("🗑️ Veritabanını SIFIRLA (Tüm Verileri Sil)"):
+            reset_db()
+            st.session_state.main_df = init_db()
+            st.success("Veritabanı temizlendi ve sıfırlandı.")
+            st.rerun()
