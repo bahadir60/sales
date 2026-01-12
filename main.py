@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 # ---------------------------------------------------------
 # SAYFA AYARLARI
 # ---------------------------------------------------------
-st.set_page_config(page_title="E-Ticaret Paneli V11.1", layout="wide", page_icon="📅")
+st.set_page_config(page_title="E-Ticaret Paneli V11.2", layout="wide", page_icon="📊")
 
 DB_FILE = 'eticaret_db_pro_v11.csv'
 
@@ -143,7 +143,7 @@ if menu == "📊 Dashboard & Düzenleme":
         
         # Karşılaştırma Tarihlerini Hesapla
         prev_start, prev_end = None, None
-        label_prev = ""
+        label_prev = "Geçmiş Dönem"
         
         if comp_mode != "Yok":
             if comp_mode == "YoY (Geçen Yıl)":
@@ -217,77 +217,80 @@ if menu == "📊 Dashboard & Düzenleme":
             
         st.markdown("---")
 
-        # --- GRAFİK ALANI ---
-        if comp_mode != "Yok":
-            c_chart1, c_chart2 = st.columns([2, 1])
-            with c_chart1:
-                # Karşılaştırma Grafiği
-                plot_metric = st.selectbox("Grafikte Göster:", metrics, index=0)
-                grp = 'Ulke' if sel_firm != "Tümü" else 'Firma'
-                
-                def prep_chart_data(d, lbl):
-                    if d.empty: return pd.DataFrame()
-                    if plot_metric in ['TACOS', 'ACOS', 'AOV']:
-                        # Groupby sonrası hesapla
-                        g = d.groupby(grp).apply(lambda x: get_metric_val(x, plot_metric)).reset_index(name='Value')
-                    else:
-                        g = d.groupby(grp)[plot_metric].sum().reset_index().rename(columns={plot_metric:'Value'})
-                    g['Dönem'] = lbl
-                    return g
-                
-                d1 = prep_chart_data(df_curr, "Bu Dönem")
-                d2 = prep_chart_data(df_prev, label_prev)
-                d_chart = pd.concat([d1, d2], ignore_index=True)
-                
-                if not d_chart.empty:
-                    fig = px.bar(d_chart, x=grp, y='Value', color='Dönem', barmode='group', 
-                                 title=f"{grp} Bazlı {plot_metric}", text_auto='.2s',
-                                 color_discrete_map={"Bu Dönem": "#00CC96", label_prev: "#EF553B"})
-                    st.plotly_chart(fig, use_container_width=True)
+        # --- GRAFİK ALANI (HER DURUMDA GÖSTERİLECEK) ---
+        c_chart1, c_chart2 = st.columns([2, 1])
+        
+        with c_chart1:
+            # Grafik İçin Metrik Seçici
+            plot_metric = st.selectbox("Grafik Verisi Seçin:", metrics, index=0)
+            grp = 'Ulke' if sel_firm != "Tümü" else 'Firma'
             
-            with c_chart2:
-                # Scatter
-                if not df_curr.empty:
-                    fig2 = px.scatter(df_curr, x="AdsSpend", y="Sales", size="AdsOrder", color="Ulke", 
-                                      hover_name="Firma", title="Spend vs Sales (Balon: AdsOrder)")
-                    st.plotly_chart(fig2, use_container_width=True)
-        else:
-            # Karşılaştırma Yoksa Basit Trend
-            d_trend = df_curr.groupby('Tarih')['Sales'].sum().reset_index()
-            fig = px.line(d_trend, x='Tarih', y='Sales', title="Zaman İçinde Satış Trendi")
-            st.plotly_chart(fig, use_container_width=True)
+            # Veri Hazırlama Fonksiyonu
+            def prep_chart_data(d, lbl):
+                if d.empty: return pd.DataFrame()
+                if plot_metric in ['TACOS', 'ACOS', 'AOV']:
+                    g = d.groupby(grp).apply(lambda x: get_metric_val(x, plot_metric)).reset_index(name='Value')
+                else:
+                    g = d.groupby(grp)[plot_metric].sum().reset_index().rename(columns={plot_metric:'Value'})
+                g['Dönem'] = lbl
+                return g
+            
+            # Bu Dönem Verisi
+            d_curr = prep_chart_data(df_curr, "Bu Dönem")
+            
+            # Geçmiş Dönem Verisi (Varsa)
+            d_prev = pd.DataFrame()
+            if comp_mode != "Yok":
+                d_prev = prep_chart_data(df_prev, label_prev)
+            
+            # Birleştir
+            d_chart = pd.concat([d_curr, d_prev], ignore_index=True)
+            
+            if not d_chart.empty:
+                # Renk Haritası
+                c_map = {"Bu Dönem": "#00CC96"}
+                if comp_mode != "Yok": c_map[label_prev] = "#EF553B"
+                
+                fig = px.bar(d_chart, x=grp, y='Value', color='Dönem', barmode='group', 
+                             title=f"{grp} Bazlı {plot_metric} Analizi", text_auto='.2s',
+                             color_discrete_map=c_map)
+                
+                # Eksen Formatı
+                if plot_metric in ['TACOS', 'ACOS']: fig.update_layout(yaxis_title="Oran (%)")
+                elif plot_metric in ['Sales', 'AdsSpend', 'AOV']: fig.update_layout(yaxis_title="Tutar (€)")
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Grafik için veri bulunamadı.")
+        
+        with c_chart2:
+            # Scatter Plot (Her zaman mevcut dönemi gösterir)
+            if not df_curr.empty:
+                fig2 = px.scatter(df_curr, x="AdsSpend", y="Sales", size="AdsOrder", color="Ulke", 
+                                  hover_name="Firma", title="Spend vs Sales (Balon: AdsOrder)")
+                st.plotly_chart(fig2, use_container_width=True)
 
         # --- TABLO VE DÜZENLEME ---
         st.subheader("📝 Veri Detayları ve Düzenleme")
-        st.caption("Verileri hücre üzerine tıklayarak düzeltebilirsiniz. En altta **TOPLAM** görünür.")
         
-        # Düzenlenecek Sütunlar
         edit_cols = ['id', 'Tarih', 'Firma', 'Ulke', 'Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'ACOS', 'TACOS', 'AOV']
-        
         df_edit = df_curr[edit_cols].copy()
         
-        # TOPLAM SATIRI EKLEME (Dinamik)
+        # TOPLAM SATIRI
         if not df_edit.empty:
-            sum_row = df_edit[['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder']].sum()
-            
-            # Oranları tekrar hesapla
-            t_acos = (sum_row['AdsSpend'] / sum_row['AdsSales'] * 100) if sum_row['AdsSales'] > 0 else 0
-            t_tacos = (sum_row['AdsSpend'] / sum_row['Sales'] * 100) if sum_row['Sales'] > 0 else 0
-            t_aov = (sum_row['Sales'] / sum_row['Unit']) if sum_row['Unit'] > 0 else 0
-            
-            # Toplam satırını oluştur (DÜZELTME BURADA: Tarih datetime formatına çevrildi)
-            total_line = pd.DataFrame([{
+            s = df_edit[['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder']].sum()
+            t_row = pd.DataFrame([{
                 'id': -1, 'Tarih': pd.to_datetime(end_date), 'Firma': 'TOPLAM', 'Ulke': '-',
-                'Sales': sum_row['Sales'], 'Unit': sum_row['Unit'], 
-                'AdsSpend': sum_row['AdsSpend'], 'AdsSales': sum_row['AdsSales'], 'AdsOrder': sum_row['AdsOrder'],
-                'ACOS': t_acos, 'TACOS': t_tacos, 'AOV': t_aov
+                'Sales': s['Sales'], 'Unit': s['Unit'], 'AdsSpend': s['AdsSpend'], 
+                'AdsSales': s['AdsSales'], 'AdsOrder': s['AdsOrder'],
+                'ACOS': (s['AdsSpend']/s['AdsSales']*100) if s['AdsSales']>0 else 0,
+                'TACOS': (s['AdsSpend']/s['Sales']*100) if s['Sales']>0 else 0,
+                'AOV': (s['Sales']/s['Unit']) if s['Unit']>0 else 0
             }])
-            
-            df_show = pd.concat([df_edit, total_line], ignore_index=True)
+            df_show = pd.concat([df_edit, t_row], ignore_index=True)
         else:
             df_show = df_edit
 
-        # Tablo Konfigürasyonu
         column_cfg = {
             "id": st.column_config.NumberColumn(disabled=True),
             "Tarih": st.column_config.DateColumn(format="DD.MM.YYYY"),
@@ -310,8 +313,6 @@ if menu == "📊 Dashboard & Düzenleme":
         if st.button("💾 Tabloyu Kaydet"):
             try:
                 master_df = st.session_state.main_df.copy()
-                
-                # Sadece geçerli ID'leri güncelle (-1 ID'li Toplam satırını atla)
                 for index, row in edited_data.iterrows():
                     row_id = row['id']
                     if row_id == -1 or pd.isna(row_id): continue
