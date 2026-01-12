@@ -8,9 +8,9 @@ from dateutil.relativedelta import relativedelta
 # ---------------------------------------------------------
 # SAYFA AYARLARI
 # ---------------------------------------------------------
-st.set_page_config(page_title="E-Ticaret Paneli V11.2", layout="wide", page_icon="📊")
+st.set_page_config(page_title="E-Ticaret Paneli V13", layout="wide", page_icon="📊")
 
-DB_FILE = 'eticaret_db_pro_v11.csv'
+DB_FILE = 'eticaret_db_pro_v13.csv'
 
 # ---------------------------------------------------------
 # 1. VERİTABANI MOTORU
@@ -100,7 +100,7 @@ def get_date_range(preset):
         end = today.replace(year=today.year-1, month=12, day=31)
         return start, end
     elif preset == "Lifetime":
-        return None, None # Tümü
+        return None, None 
     return today, today
 
 # ---------------------------------------------------------
@@ -138,10 +138,9 @@ if menu == "📊 Dashboard & Düzenleme":
             else:
                 start_date, end_date = s_temp, e_temp
         
-        # 2. Karşılaştırma Modu (3 Bölüm)
+        # 2. Karşılaştırma Modu
         comp_mode = st.sidebar.radio("Karşılaştırma:", ["Yok", "MoM (Önceki Dönem)", "YoY (Geçen Yıl)"])
         
-        # Karşılaştırma Tarihlerini Hesapla
         prev_start, prev_end = None, None
         label_prev = "Geçmiş Dönem"
         
@@ -151,7 +150,6 @@ if menu == "📊 Dashboard & Düzenleme":
                 prev_end = end_date - relativedelta(years=1)
                 label_prev = "Geçen Yıl"
             elif comp_mode == "MoM (Önceki Dönem)":
-                # Tarih aralığı kadar geriye git
                 delta = end_date - start_date + datetime.timedelta(days=1)
                 prev_end = start_date - datetime.timedelta(days=1)
                 prev_start = prev_end - delta + datetime.timedelta(days=1)
@@ -159,7 +157,7 @@ if menu == "📊 Dashboard & Düzenleme":
             
             st.sidebar.info(f"Kıyas: {prev_start} - {prev_end}")
 
-        # 3. Firma ve Ülke Filtreleri (Hafızalı)
+        # 3. Firma ve Ülke Filtreleri
         firms = ["Tümü"] + sorted(list(df['Firma'].unique()))
         countries = ["Tümü"] + sorted(list(df['Ulke'].unique()))
         
@@ -167,17 +165,14 @@ if menu == "📊 Dashboard & Düzenleme":
         sel_country = st.sidebar.selectbox("Ülke", countries, key="sel_cntry_dash")
         
         # VERİ SÜZME
-        # A) Mevcut Dönem
         mask_curr = (df['Tarih'].dt.date >= start_date) & (df['Tarih'].dt.date <= end_date)
         df_curr = df.loc[mask_curr].copy()
         
-        # B) Geçmiş Dönem
         df_prev = pd.DataFrame()
         if comp_mode != "Yok" and prev_start:
             mask_prev = (df['Tarih'].dt.date >= prev_start) & (df['Tarih'].dt.date <= prev_end)
             df_prev = df.loc[mask_prev].copy()
         
-        # Ortak Filtre Uygulama
         if sel_firm != "Tümü":
             df_curr = df_curr[df_curr['Firma'] == sel_firm]
             if not df_prev.empty: df_prev = df_prev[df_prev['Firma'] == sel_firm]
@@ -186,89 +181,105 @@ if menu == "📊 Dashboard & Düzenleme":
             df_curr = df_curr[df_curr['Ulke'] == sel_country]
             if not df_prev.empty: df_prev = df_prev[df_prev['Ulke'] == sel_country]
 
-        # --- KPI KARTLARI ---
+        # --- KARŞILAŞTIRMA & KPI KARTLARI ---
         st.markdown(f"### 🗓️ Dönem: {start_date} - {end_date}")
         
-        # Metrik Listesi
-        metrics = ['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'TACOS', 'ACOS', 'AOV']
+        metrics_options = ['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder', 'TACOS', 'ACOS', 'AOV']
         
-        # KPI Hesaplayıcı
-        def get_metric_val(dframe, m):
+        # --- İSTEK: Varsayılan Olarak 5 Metrik Açık ---
+        selected_metrics = st.multiselect(
+            "Karşılaştırılacak Metrikler:",
+            metrics_options,
+            default=['Sales', 'Unit', 'AdsSpend', 'AdsSales', 'TACOS']
+        )
+        
+        # KPI Hesaplayıcı (Scalar)
+        def get_total_metric(dframe, m):
             if dframe.empty: return 0
             if m == 'TACOS': return (dframe['AdsSpend'].sum() / dframe['Sales'].sum() * 100) if dframe['Sales'].sum() > 0 else 0
             if m == 'ACOS': return (dframe['AdsSpend'].sum() / dframe['AdsSales'].sum() * 100) if dframe['AdsSales'].sum() > 0 else 0
             if m == 'AOV': return (dframe['Sales'].sum() / dframe['Unit'].sum()) if dframe['Unit'].sum() > 0 else 0
             return dframe[m].sum()
 
-        cols = st.columns(4)
-        for i, m in enumerate(['Sales', 'Unit', 'AdsSpend', 'TACOS']): # İlk 4 önemli
-            curr_val = get_metric_val(df_curr, m)
-            prev_val = get_metric_val(df_prev, m) if not df_prev.empty else 0
-            
-            delta = None
-            if comp_mode != "Yok":
-                diff = curr_val - prev_val
-                pct = (diff / prev_val * 100) if prev_val > 0 else 0
-                delta = f"{pct:.1f}%"
-            
-            fmt = "%.2f%%" if m in ['TACOS', 'ACOS'] else ("%.2f €" if m in ['Sales', 'AdsSpend', 'AOV'] else "%.0f")
-            
-            cols[i].metric(m, fmt % curr_val, delta, delta_color="inverse" if m in ['TACOS', 'ACOS'] else "normal")
+        # Kartları Göster
+        if selected_metrics:
+            cols = st.columns(len(selected_metrics))
+            for i, m in enumerate(selected_metrics):
+                curr_val = get_total_metric(df_curr, m)
+                prev_val = get_total_metric(df_prev, m) if not df_prev.empty else 0
+                
+                delta = None
+                if comp_mode != "Yok":
+                    diff = curr_val - prev_val
+                    pct = (diff / prev_val * 100) if prev_val > 0 else 0
+                    delta = f"{pct:.1f}%"
+                
+                fmt = "%.2f%%" if m in ['TACOS', 'ACOS'] else ("%.2f €" if m in ['Sales', 'AdsSpend', 'AdsSales', 'AOV'] else "%.0f")
+                color = "inverse" if m in ['TACOS', 'ACOS'] else "normal"
+                
+                cols[i].metric(m, fmt % curr_val, delta, delta_color=color)
             
         st.markdown("---")
 
-        # --- GRAFİK ALANI (HER DURUMDA GÖSTERİLECEK) ---
-        c_chart1, c_chart2 = st.columns([2, 1])
-        
-        with c_chart1:
-            # Grafik İçin Metrik Seçici
-            plot_metric = st.selectbox("Grafik Verisi Seçin:", metrics, index=0)
-            grp = 'Ulke' if sel_firm != "Tümü" else 'Firma'
-            
-            # Veri Hazırlama Fonksiyonu
-            def prep_chart_data(d, lbl):
-                if d.empty: return pd.DataFrame()
-                if plot_metric in ['TACOS', 'ACOS', 'AOV']:
-                    g = d.groupby(grp).apply(lambda x: get_metric_val(x, plot_metric)).reset_index(name='Value')
-                else:
-                    g = d.groupby(grp)[plot_metric].sum().reset_index().rename(columns={plot_metric:'Value'})
-                g['Dönem'] = lbl
-                return g
-            
-            # Bu Dönem Verisi
-            d_curr = prep_chart_data(df_curr, "Bu Dönem")
-            
-            # Geçmiş Dönem Verisi (Varsa)
-            d_prev = pd.DataFrame()
-            if comp_mode != "Yok":
-                d_prev = prep_chart_data(df_prev, label_prev)
-            
-            # Birleştir
-            d_chart = pd.concat([d_curr, d_prev], ignore_index=True)
-            
-            if not d_chart.empty:
-                # Renk Haritası
-                c_map = {"Bu Dönem": "#00CC96"}
-                if comp_mode != "Yok": c_map[label_prev] = "#EF553B"
+        # --- GRAFİK ALANI ---
+        if comp_mode != "Yok":
+            c_chart1, c_chart2 = st.columns([3, 1])
+            with c_chart1:
+                st.subheader("📈 Karşılaştırma Grafiği")
                 
-                fig = px.bar(d_chart, x=grp, y='Value', color='Dönem', barmode='group', 
-                             title=f"{grp} Bazlı {plot_metric} Analizi", text_auto='.2s',
-                             color_discrete_map=c_map)
+                # Grafik Ayarları
+                col_g1, col_g2 = st.columns(2)
+                plot_metric = col_g1.selectbox("Grafik Verisi:", metrics, index=0)
                 
-                # Eksen Formatı
-                if plot_metric in ['TACOS', 'ACOS']: fig.update_layout(yaxis_title="Oran (%)")
-                elif plot_metric in ['Sales', 'AdsSpend', 'AOV']: fig.update_layout(yaxis_title="Tutar (€)")
+                # --- İSTEK: Toplam Gösterme Seçeneği ---
+                group_mode = col_g2.radio("Gruplama:", ["Ülke", "Firma", "Genel Toplam"], horizontal=True, index=2)
                 
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Grafik için veri bulunamadı.")
-        
-        with c_chart2:
-            # Scatter Plot (Her zaman mevcut dönemi gösterir)
+                grp = 'Ulke' if group_mode == "Ülke" else ('Firma' if group_mode == "Firma" else None)
+                
+                # Grafik Verisi Hazırla (DataFrame)
+                def prep_chart_data(d, lbl):
+                    if d.empty: return pd.DataFrame()
+                    
+                    if grp: # Ülke veya Firma Bazlı
+                        if plot_metric in ['TACOS', 'ACOS', 'AOV']:
+                            g = d.groupby(grp).apply(lambda x: get_total_metric(x, plot_metric)).reset_index(name='Value')
+                        else:
+                            g = d.groupby(grp)[plot_metric].sum().reset_index().rename(columns={plot_metric:'Value'})
+                        g['Grup'] = g[grp]
+                    else: # Genel Toplam
+                        val = get_total_metric(d, plot_metric)
+                        g = pd.DataFrame({'Grup': ['Toplam'], 'Value': [val]})
+                        
+                    g['Dönem'] = lbl
+                    return g
+                
+                d1 = prep_chart_data(df_curr, "Bu Dönem")
+                d2 = prep_chart_data(df_prev, label_prev)
+                d_chart = pd.concat([d1, d2], ignore_index=True)
+                
+                if not d_chart.empty:
+                    fig = px.bar(d_chart, x='Grup', y='Value', color='Dönem', barmode='group', 
+                                 text_auto='.2s', color_discrete_map={"Bu Dönem": "#00CC96", label_prev: "#EF553B"})
+                    
+                    if plot_metric in ['TACOS', 'ACOS']: fig.update_layout(yaxis_title="Oran (%)")
+                    elif plot_metric in ['Sales', 'AdsSpend', 'AOV']: fig.update_layout(yaxis_title="Tutar (€)")
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with c_chart2:
+                # Scatter
+                if not df_curr.empty:
+                    st.subheader("💡 İlişki Analizi")
+                    fig2 = px.scatter(df_curr, x="AdsSpend", y="Sales", size="AdsOrder", color="Ulke", 
+                                      hover_name="Firma", title="Spend vs Sales")
+                    st.plotly_chart(fig2, use_container_width=True)
+        else:
+            # Trend Grafiği
             if not df_curr.empty:
-                fig2 = px.scatter(df_curr, x="AdsSpend", y="Sales", size="AdsOrder", color="Ulke", 
-                                  hover_name="Firma", title="Spend vs Sales (Balon: AdsOrder)")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.subheader("📈 Zaman İçinde Satış Trendi")
+                d_trend = df_curr.groupby('Tarih')['Sales'].sum().reset_index()
+                fig = px.line(d_trend, x='Tarih', y='Sales', markers=True)
+                st.plotly_chart(fig, use_container_width=True)
 
         # --- TABLO VE DÜZENLEME ---
         st.subheader("📝 Veri Detayları ve Düzenleme")
