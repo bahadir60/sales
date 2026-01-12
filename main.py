@@ -9,7 +9,7 @@ from pandas.tseries.offsets import MonthEnd
 # ---------------------------------------------------------
 # SAYFA AYARLARI
 # ---------------------------------------------------------
-st.set_page_config(page_title="E-Ticaret Paneli V14 (Haftalık/Aylık)", layout="wide", page_icon="📅")
+st.set_page_config(page_title="E-Ticaret Paneli V14.1", layout="wide", page_icon="✅")
 
 DB_FILE = 'eticaret_db_pro_v14.csv'
 
@@ -20,7 +20,7 @@ def init_db():
     columns = [
         'id', 'Tarih', 'Yil', 'Ay', 'Firma', 'Ulke', 
         'Sales', 'Unit', 'AdsSpend', 'AdsSales', 'AdsOrder',
-        'ACOS', 'TACOS', 'AOV', 'VeriTipi' # VeriTipi eklendi (Aylık/Haftalık takibi için)
+        'ACOS', 'TACOS', 'AOV', 'VeriTipi'
     ]
     if not os.path.exists(DB_FILE):
         df = pd.DataFrame(columns=columns)
@@ -120,7 +120,6 @@ if menu == "📊 Dashboard & Düzenleme":
         st.sidebar.markdown("---")
         st.sidebar.header("🗓️ Tarih & Kıyaslama")
         
-        # Tarih Seçimi
         today = datetime.date.today()
         
         def get_date_range(preset):
@@ -312,7 +311,7 @@ if menu == "📊 Dashboard & Düzenleme":
                 st.error(f"Hata: {e}")
 
 # ---------------------------------------------------------
-# MODÜL 2: EXCEL YÜKLEME (AY SONUNA KAYIT)
+# MODÜL 2: EXCEL YÜKLEME (AY SONUNA KAYIT - DÜZELTİLDİ)
 # ---------------------------------------------------------
 elif menu == "📤 Excel Yükle (Aylık)":
     st.title("📤 Aylık Excel Verisi Yükle")
@@ -340,13 +339,18 @@ elif menu == "📤 Excel Yükle (Aylık)":
                 c2.success(f"Algılanan Ay: {month_num}")
 
             df_temp = xls[selected_sheet].copy()
-            # Header Bul
+            # --- HATA DÜZELTMESİ (any() kullanımı) ---
             h_row = 0
             for i, row in df_temp.head(10).iterrows():
-                if any('firm' in row.astype(str).str.lower().tolist()):
+                # Satırdaki tüm değerleri string listesine çevirip kontrol et
+                row_str_list = row.astype(str).str.lower().tolist()
+                if any('firm' in s for s in row_str_list):
                     h_row = i + 1
                     break
-            if h_row > 0: df_temp = pd.read_excel(uploaded_file, sheet_name=selected_sheet, header=h_row)
+            
+            if h_row > 0: 
+                df_temp = pd.read_excel(uploaded_file, sheet_name=selected_sheet, header=h_row)
+            
             df_temp = df_temp.dropna(how='all')
             cols = df_temp.columns.tolist()
             
